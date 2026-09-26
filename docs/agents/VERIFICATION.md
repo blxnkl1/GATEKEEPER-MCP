@@ -116,6 +116,32 @@ Do not modify any file. Report the decision verbatim.
 Expected: the command fails to find the test, the evidence is `unverifiable` or
 `not_reproduced`, and the verdict is `deny` or `request_info`. Again correct.
 
+### 4b. Confirm what an approval actually requires
+
+Since v1.0.0 a `deny` here is not only about your reproduction. `allow` needs
+**four** server-observed facts, and you can only influence two of them:
+
+| Requirement | Who observes it |
+| --- | --- |
+| the reproduction exited non-zero | the server, from your command |
+| the working tree is clean | the server, from `git status` |
+| the project's verification command was run | the server, always |
+| that verification command also failed | the server, always |
+
+So if the gate returns `deny` with `state.tests` of `unknown`, the cause is the
+third or fourth row: the project has no verification command the gate can run, or
+it passes. That is not something a cleverer reproduction fixes. Either add a
+`test` script the gate can discover, or set `testCommand` in `.gatekeeperrc.json`:
+
+```json
+{ "testCommand": ["pytest", "-q"] }
+```
+
+A `request_info` with `state.tests: "pass"` means the project's own tests are
+green while your reproduction fails, so the reported problem is not confirmed by
+them. The next step is a failing test that captures the bug, not a different
+command.
+
 ## 5. Confirm the agent obeys a denial
 
 ```

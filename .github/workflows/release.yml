@@ -23,11 +23,13 @@ name: release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      # Requires a numeric major.minor.patch core. A bare `v*.*.*` also matches
+      # `vfoo.bar.baz` and every prerelease-shaped tag, so an unrelated tag
+      # pointing at this repository would start a publish attempt.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   test:
@@ -59,11 +61,21 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: MCP protocol test
+        run: bash scripts/e2e/mcp-protocol.sh
+
+      - name: Installer and uninstaller tests
+        # Needs a tarball for the round-trip, and `npm pack` builds it.
+        run: |
+          npm pack
+          bash scripts/install.test.sh
+
       - name: Check the tag matches the package version
         run: |
-          # Without this, tagging v1.0.0 against a package.json that still says
-          # 0.0.1 fails at `npm publish` with a duplicate-version error that
-          # reads like a registry problem rather than a tagging mistake.
+          # Without this, tagging a version against a package.json that still
+          # reports the previous one fails at `npm publish` with a
+          # duplicate-version error that reads like a registry problem rather
+          # than a tagging mistake.
           pkg="$(node -p "require('./package.json').version")"
           tag="${GITHUB_REF_NAME#v}"
           if [ "$pkg" != "$tag" ]; then
@@ -76,6 +88,12 @@ jobs:
     name: publish
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      # Least privilege. The OIDC token exists only to sign npm provenance on the
+      # publish step; the test matrix above has no use for it, so it is not given
+      # one.
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -131,9 +149,17 @@ jobs:
           npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/gatekeeper-mcp-*.tgz
           test -x node_modules/.bin/gatekeeper-mcp
           # It must start and wait on stdin, emitting only a stderr log line.
-          timeout 5 node_modules/.bin/gatekeeper-mcp </dev/null 2>stderr.log
+          # It must start, wait on stdin, log to stderr, and put nothing on
+          # stdout: that stream carries the JSON-RPC frame stream once an MCP
+          # host spawns it.
+          timeout 5 node_modules/.bin/gatekeeper-mcp </dev/null >stdout.log 2>stderr.log
           test -s stderr.log
-          test ! -s /dev/stdin < /dev/null || true
+          if [ -s stdout.log ]; then
+            echo "::error::the installed server wrote to stdout on startup:"
+            cat stdout.log
+            exit 1
+          fi
+          echo "the installed server keeps stdout clean"
 
       - name: Publish
         run: npm publish --provenance --access public

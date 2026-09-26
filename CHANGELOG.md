@@ -44,6 +44,12 @@ model whose limits are documented rather than implied.
   pre-action one so enforced mode can always verify between two checks.
 - **Invalid configuration still fails closed**, with exit code 78 and nothing on
   stdout. No configuration option can switch the invariant off.
+- **`npm pack` now builds first.** A `prepack` script was added after a release
+  audit found that `npm pack` in a clean checkout produced a five-file package
+  containing no server at all: `dist/` is gitignored, `prepublishOnly` is a
+  publish-only hook that `npm pack` does not run, and the `files` allowlist
+  silently matched nothing. Anyone installing from a git URL, or packing
+  locally, would have received a broken package.
 
 ### Added
 

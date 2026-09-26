@@ -67,11 +67,34 @@ Concretely:
   `SKILL.md`, plus `package.json` which npm always includes. `npm pack --dry-run`
   is asserted against that allowlist in `ci.yml`, so a file added to the
   repository by accident cannot silently ship.
-- `prepublishOnly` runs `typecheck`, `lint`, `test`, and `build` before the
-  tarball is created, as a second line of defence that applies to any publish
-  path, including a deliberate local one.
+- A `prepack` script runs `build`, so the tarball is never assembled from a stale
+  or missing `dist/`. This was added after a release audit found that
+  `prepublishOnly` is a publish-only hook: `npm pack` in a clean checkout produced
+  a five-file package with no server in it, because `dist/` is gitignored and the
+  `files` allowlist silently matched nothing.
+- `prepublishOnly` runs `typecheck`, `lint`, `test`, and `build` as a second line
+  of defence on the publish path itself.
 - Trusted publishing (OIDC) is documented as a `TODO` in the workflow header as
   the preferred end state.
+
+### Amendment, 2026-09-27: release preconditions tightened
+
+Four changes to the mechanism above, none of which alters the decision to publish
+only from CI.
+
+- **The tag pattern is `v[0-9]+.[0-9]+.[0-9]+*`, not `v*.*.*`.** The looser glob
+  also matches `vfoo.bar.baz` and every prerelease-shaped tag, so any unrelated
+  tag pointing at this repository would have started a publish attempt.
+- **The tag must equal `package.json`.** Both the test matrix and the publish job
+  check it, so a mistagged release fails with a clear message instead of a
+  duplicate-version error from the registry that reads like a registry problem.
+  Verified locally: `v1.0.1` against `package.json` `1.0.0` is rejected.
+- **`id-token: write` is scoped to the publish job** rather than the workflow. The
+  OIDC token exists only to sign provenance; the test matrix has no use for it.
+- **The release gate now also runs the MCP protocol test and the installer
+  round-trip**, so a publish cannot happen on a tree where those fail. The
+  published tarball is installed and started before `npm publish`, and the
+  installed server is asserted to keep stdout clean.
 
 ## Consequences
 

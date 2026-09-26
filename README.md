@@ -17,6 +17,12 @@ sends no telemetry.
 
 Requires **Node.js >= 20**.
 
+> **The two paths below need the package on npm.** `v1.0.0` is tagged but not yet
+> published, so `npx -y gatekeeper-mcp` and the installer currently return a 404.
+> They are the intended day-to-day install, and they are verified against a
+> locally packed tarball rather than the registry. Until publication, use the
+> from-source path at the bottom of this section.
+
 **Try it without installing.** Let your agent fetch and run the package:
 
 ```bash
@@ -37,13 +43,22 @@ Options: `--version <tag>` to pin, `--prefix <dir>` to change the install prefix
 curl -fsSL https://raw.githubusercontent.com/blxnkl1/GATEKEEPER-MCP/main/scripts/uninstall.sh | bash
 ```
 
-**Work on the project, or install from source:**
+**Work on the project, or install from source.** This works today, with no
+registry access:
 
 ```bash
 git clone https://github.com/blxnkl1/GATEKEEPER-MCP.git
 cd GATEKEEPER-MCP
 npm ci
 npm run build
+opencode mcp add gatekeeper -- node "$PWD/dist/index.js"
+```
+
+To put that local build on your `PATH` instead of pointing at a checkout:
+
+```bash
+npm install -g --prefix "$HOME/.local" .
+"$HOME/.local/bin/gatekeeper-mcp"    # starts, logs to stderr, waits on stdio
 ```
 
 ## Compatibility matrix

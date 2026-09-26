@@ -24,7 +24,7 @@ suppress the unnecessary edits that make agents unsafe to run unattended.
   answer is never `allow`.
 - **Explainable.** Every verdict carries a human-readable reason and concrete
   next steps, so the agent can recover without guessing.
-- **Small surface.** One tool, one pipeline, three stages. Anything that is not
+- **Small surface.** Two tools, one pipeline, three stages. Anything that is not
   needed to answer "should I edit?" does not belong here.
 
 ## Non-Goals
@@ -486,16 +486,24 @@ package, which can be slow enough to trip an agent's MCP start-up timeout. A
 global install pays that cost once, at install time. That is the whole reason the
 installer exists rather than a README line.
 
-**Why cloning is still documented.** The package is not published yet, so the
-clone path is the only one that works today. It is also the correct path for
-anyone changing the server, and the one the Phase 3 agent guides use, because
-those snippets need an absolute path to a build that exists.
+**Why cloning is still documented.** Until the package reaches the registry, the
+clone path is the only one that works. Afterwards it remains the correct path for
+anyone changing the server, and the one the per-agent guides use, because those
+snippets need an absolute path to a build that exists.
+
+**The tarball is built from source, not from a stale `dist/`.** `dist/` is
+gitignored, and `npm pack` does not run `prepublishOnly`, so a plain `npm pack` in
+a fresh checkout would otherwise produce a package containing no server at all —
+the `files` allowlist would silently include nothing. A `prepack` script that runs
+the build closes that, which is what makes `npm pack` reproducible from any clean
+checkout and not only from a working tree someone happened to build in.
 
 **Publishing** is described in
-[ADR 0003](./decisions/0003-npm-publish-strategy.md). In short: GitHub Actions on
-a `v*.*.*` tag, the full check suite on Linux and macOS, then `npm publish
---provenance` on Linux. Manual publishing is prohibited by policy, so the
-published artefact is always a clean checkout of a tagged commit.
+[ADR 0003](./decisions/0003-npm-publish-strategy.md). In short: GitHub Actions on a
+`v<major>.<minor>.<patch>` tag whose numbers must equal `package.json`, the full
+check suite on Linux and macOS, then `npm publish --provenance` on Linux.
+Manual publishing is prohibited by policy, so the published artefact is always a
+clean checkout of a tagged commit.
 
 ## Future Work
 
