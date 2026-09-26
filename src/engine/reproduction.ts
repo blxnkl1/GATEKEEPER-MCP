@@ -16,6 +16,7 @@
  * full rationale behind each guard below.
  */
 
+import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -269,17 +270,52 @@ export async function executeCommand(spec: CommandSpec, deps: Deps): Promise<Com
 /**
  * Rejects a path that escapes the repository root.
  *
- * Confining the working directory stops a reproduction from being pointed at
- * `/etc`, `$HOME`, or another checkout. This check is lexical, so a symlink
- * inside the repository that points outside it is not caught; that limitation
- * is recorded in `docs/phases.md`.
+ * Both sides are resolved through `realpath` first, so a symlink inside the
+ * repository that points outside it is rejected rather than followed. A purely
+ * lexical comparison is not enough: a committed symlink named `escape` aimed at
+ * `/etc` passes `startsWith(root + sep)` while the process actually runs
+ * somewhere else entirely.
  *
- * @param root Absolute, resolved repository root.
- * @param target Absolute, resolved candidate path.
+ * Resolution is best-effort. A path that does not exist yet cannot be resolved,
+ * so it falls back to its lexical form; the important case, an existing symlink,
+ * is always resolved.
+ *
+ * @param root Absolute repository root.
+ * @param target Absolute candidate path.
  * @returns Whether `target` is the root itself or lives beneath it.
  */
-function isInsideRepo(root: string, target: string): boolean {
-  return target === root || target.startsWith(root + sep)
+export function isInsideRepo(root: string, target: string): boolean {
+  const realRoot = realpathOrSelf(root)
+  const realTarget = realpathOrSelf(target)
+  return realTarget === realRoot || realTarget.startsWith(realRoot + sep)
+}
+
+/**
+ * Resolves a path to its real location, falling back to the input.
+ *
+ * @param path Absolute path to resolve.
+ * @return The real path, or `path` unchanged when it cannot be resolved.
+ */
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
+  }
+}
+
+/**
+ * The repository root, with symlinks resolved.
+ *
+ * Every confinement decision is made against this value rather than
+ * `process.cwd()`, so that a repository reached through a symlinked path still
+ * compares equal to the root the caller asked about.
+ *
+ * @param deps Injected dependencies.
+ * @returns The real, absolute repository root.
+ */
+export function resolveRepoRoot(deps: Deps): string {
+  return realpathOrSelf(resolve(deps.cwd()))
 }
 
 /**
@@ -288,8 +324,13 @@ function isInsideRepo(root: string, target: string): boolean {
  * Free-text evidence is deliberately not treated as proof. A paragraph
  * describing a stack trace is exactly as easy to fabricate as a change is to
  * justify, so it can only ever lead to `request_info`. Only an executed command
- * whose exit code matches the agent's stated expectation produces `reproduced`,
- * and `reproduced` is the only state that can lead to `allow`.
+ * that exited non-zero produces `reproduced`, and `reproduced` is the only state
+ * that can lead to `allow`.
+ *
+ * The exit code is the sole criterion. The agent's declared expectation is
+ * recorded and echoed back, but it is never allowed to decide the verdict: a
+ * caller who could also pick the polarity could pick a command that exits zero
+ * and have that success reported as a reproduced failure.
  *
  * @param input Validated tool input.
  * @param deps Injected dependencies.
@@ -327,7 +368,7 @@ export async function runReproduction(input: PreActionCheckInput, deps: Deps): P
     return { state: 'unverifiable', detail: 'A reproduction argument contains a null byte.' }
   }
 
-  const root = resolve(deps.cwd())
+  const root = resolveRepoRoot(deps)
   const cwd = spec.cwd === undefined ? root : resolve(root, spec.cwd)
 
   if (!isInsideRepo(root, cwd)) {
@@ -389,7 +430,18 @@ export async function runReproduction(input: PreActionCheckInput, deps: Deps): P
   }
 
   const failed = result.exitCode !== 0
-  const reproduced = expectFailure ? failed : !failed
+
+  // SECURITY INVARIANT: the observed exit code is the only thing that can make
+  // this a failure. The agent's declared expectation is deliberately NOT
+  // consulted here.
+  //
+  // An earlier version computed `expectFailure ? failed : !failed`, which let the
+  // agent pick the polarity as well as the command: `{"command":"true",
+  // "expectFailure":false}` exited zero and was reported as `reproduced`, which
+  // is the only state that can lead to `allow`. A boolean supplied by the caller
+  // must never be able to manufacture evidence of a failure, so `failed` stands
+  // alone and `expectFailure` survives only as descriptive metadata.
+  const reproduced = failed
   const outcomeLine = excerpt(result.stdout) || excerpt(result.stderr)
 
   const base = {
@@ -398,9 +450,13 @@ export async function runReproduction(input: PreActionCheckInput, deps: Deps): P
   }
 
   if (reproduced) {
-    const detail = expectFailure
-      ? `Reproduction succeeded: "${spec.command}" exited ${result.exitCode} in ${result.durationMs}ms.`
-      : `Reproduction succeeded: "${spec.command}" exited ${result.exitCode} in ${result.durationMs}ms, which is the expected outcome.`
+    // Only a genuinely observed non-zero exit reaches this branch, so the
+    // wording can state that a failure was reproduced without hedging.
+    const contradiction =
+      expectFailure === false
+        ? ' It contradicts the declared expectation that this command succeeds today.'
+        : ''
+    const detail = `Reproduction succeeded: "${spec.command}" exited ${result.exitCode} in ${result.durationMs}ms, a non-zero exit observed as the failure.${contradiction}`
     return {
       state: 'reproduced',
       detail: outcomeLine === '' ? detail : `${detail} Output: ${outcomeLine}`,
@@ -408,9 +464,10 @@ export async function runReproduction(input: PreActionCheckInput, deps: Deps): P
     }
   }
 
-  const detail = expectFailure
-    ? 'Command succeeded; no failure observed.'
-    : 'Command failed, but it was declared to be expected to succeed.'
+  // A zero exit is never failure evidence, whatever the agent expected. Say so
+  // plainly, because the agent is the one who has to decide what happens next.
+  const detail =
+    'Command succeeded (exit 0); no failure observed. A successful command is never evidence that a problem exists.'
   return {
     state: 'not_reproduced',
     detail: outcomeLine === '' ? detail : `${detail} Output: ${outcomeLine}`,

@@ -73,24 +73,56 @@ function canSkipState(
 }
 
 /**
+ * Server-side settings for the analysis pipeline.
+ *
+ * Both fields are operator configuration rather than agent input, because the
+ * verification command's result is the decisive evidence for `allow`.
+ */
+export interface AnalyzeOptions {
+  /**
+   * Operator-declared verification command, as argv.
+   *
+   * Never agent input: the decision engine treats this command's result as the
+   * decisive evidence for `allow`, so the agent must not be able to choose it.
+   */
+  testCommand?: readonly string[]
+  /** Ceiling for the verification command. */
+  testTimeoutMs?: number
+}
+
+/**
  * Runs the full gatekeeper pipeline for a proposed change.
  *
  * 1. {@link runReproduction} - execute the agent's reproduction, if any.
- * 2. {@link inspectState} - establish the working tree and, on request, the
- *    test suite result. Skipped when stage 1 already fixes the verdict.
+ * 2. {@link inspectState} - establish the working tree and, whenever it can
+ *    change the verdict, run the project's verification command. Skipped
+ *    entirely when stage 1 already fixes the verdict.
  * 3. {@link decide} - apply the policy to the collected facts.
  *
  * @param input Validated `pre_action_check` input.
  * @param deps Injected dependencies. Defaults to the real Node built-ins.
+ * @param options Server-side verification settings.
  * @returns The final decision, reason, next steps, and supporting evidence.
  */
 export async function analyze(
   input: PreActionCheckInput,
   deps: Deps = realDeps,
+  options: AnalyzeOptions = {},
 ): Promise<PreActionCheckOutput> {
   const evidence = await runReproduction(input, deps)
   const skipState = canSkipState(evidence, input)
-  const state = skipState ? SKIPPED_STATE : await inspectState(input, deps)
+
+  // The verification command is load-bearing for `allow`, so it runs whenever a
+  // reproduced failure could plausibly reach that branch. The tree is inspected
+  // first and the suite is skipped unless the tree turned out clean, because
+  // rules 5a and 5a' settle the verdict before rule 5b is ever consulted.
+  const state = skipState
+    ? SKIPPED_STATE
+    : await inspectState(input, deps, {
+        runVerification: evidence.state === 'reproduced',
+        ...(options.testCommand === undefined ? {} : { testCommand: options.testCommand }),
+        ...(options.testTimeoutMs === undefined ? {} : { testTimeoutMs: options.testTimeoutMs }),
+      })
 
   if (skipState) {
     logger.debug('analyze: state inspection skipped, verdict is already determined')

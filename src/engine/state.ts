@@ -23,14 +23,15 @@ import { z } from 'zod'
 
 import { logger } from '../logger.js'
 import type { Deps, PreActionCheckInput, StateInfo } from '../types/index.js'
-import { excerpt, executeCommand } from './reproduction.js'
+import { excerpt, executeCommand, resolveRepoRoot } from './reproduction.js'
 
 /**
- * Hard-coded ceiling for the test suite in Phase 2.
+ * Default ceiling for the verification command.
  *
  * A full suite is expected to be slow, so this is far more generous than the
- * reproduction timeout. It is not configurable yet; making it configurable is
- * Phase 5 work along with `.gatekeeperrc.json`.
+ * reproduction timeout. It is overridable with `testTimeoutMs` because a
+ * project's suite is now load-bearing: an operator whose suite needs longer can
+ * raise the ceiling rather than lose the ability to reach `allow`.
  */
 export const TEST_TIMEOUT_MS = 120_000
 
@@ -91,7 +92,43 @@ function readManifest(root: string): z.infer<typeof packageManifestSchema> | nul
 }
 
 /**
- * Runs the project test suite and reports the outcome.
+ * Resolves the verification command to run.
+ *
+ * An operator-configured `testCommand` always wins. It is an argv array, so
+ * configuring it never introduces a shell, and it is server-side state: the
+ * agent cannot influence which command decides whether the project is broken.
+ * Only when it is unset does the package-manager heuristic apply, and that
+ * heuristic is also server-side.
+ *
+ * @param root Absolute repository root.
+ * @param configured Operator-declared argv, if any.
+ * @returns The argv to run, or null when no verification command is known.
+ */
+export function resolveTestCommand(
+  root: string,
+  configured: readonly string[] | undefined,
+): { command: string; args: string[] } | null {
+  if (configured !== undefined && configured.length > 0) {
+    const [command, ...args] = configured
+    if (command !== undefined) {
+      return { command, args }
+    }
+  }
+
+  const manifest = readManifest(root)
+  if (manifest === null) {
+    return null
+  }
+  if (manifest.scripts?.test === undefined) {
+    return null
+  }
+
+  const command = detectPackageManager(root)
+  return { command, args: ['test'] }
+}
+
+/**
+ * Runs the project's test suite and reports the outcome.
  *
  * Only the exit code is interpreted. Test output is deliberately not parsed:
  * every runner formats its output differently, and a gatekeeper that scraped
@@ -101,88 +138,99 @@ function readManifest(root: string): z.infer<typeof packageManifestSchema> | nul
  *
  * @param root Absolute repository root.
  * @param deps Injected dependencies.
+ * @param configured Operator-declared argv, if any.
+ * @param timeoutMs Ceiling for the suite.
  * @returns The suite verdict plus a detail string.
  */
 async function runTestSuite(
   root: string,
   deps: Deps,
+  configured: readonly string[] | undefined,
+  timeoutMs: number,
 ): Promise<{ tests: StateInfo['tests']; detail: string }> {
-  const manifest = readManifest(root)
-  if (manifest === null) {
+  const resolved = resolveTestCommand(root, configured)
+  if (resolved === null) {
     return {
       tests: 'unknown',
-      detail: 'No readable package.json, so no test runner was recognised.',
+      detail:
+        'No verification command is known: package.json defines no "test" script. ' +
+        'Set `testCommand` in .gatekeeperrc.json so the gate can confirm the project is actually failing.',
     }
   }
 
-  if (manifest.scripts?.test === undefined) {
-    return {
-      tests: 'unknown',
-      detail: 'package.json defines no "test" script, so no test runner was recognised.',
-    }
-  }
-
-  const command = detectPackageManager(root)
-  const result = await executeCommand(
-    { command, args: ['test'], cwd: root, timeoutMs: TEST_TIMEOUT_MS },
-    deps,
-  )
+  const { command, args } = resolved
+  const result = await executeCommand({ command, args, cwd: root, timeoutMs }, deps)
 
   logger.debug(
     {
       command,
+      args,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
       durationMs: result.durationMs,
       stderr: excerpt(result.stderr),
     },
-    'state: test suite finished',
+    'state: verification command finished',
   )
 
   if (result.spawnError !== null) {
     return {
       tests: 'unknown',
-      detail: `Could not start "${command} test" (${result.spawnError}).`,
+      detail: `Could not start "${command}" (${result.spawnError}).`,
     }
   }
 
   if (result.timedOut) {
     return {
       tests: 'unknown',
-      detail: `The test suite exceeded ${TEST_TIMEOUT_MS}ms and was killed; its result is unknown.`,
+      detail: `The verification command exceeded ${timeoutMs}ms and was killed; its result is unknown.`,
     }
   }
 
   if (result.exitCode === null) {
     return {
       tests: 'unknown',
-      detail: 'The test suite terminated abnormally; its result is unknown.',
+      detail: 'The verification command terminated abnormally; its result is unknown.',
     }
   }
 
+  const printable = [command, ...args].join(' ')
   return result.exitCode === 0
-    ? { tests: 'pass', detail: `"${command} test" exited 0 after ${result.durationMs}ms.` }
+    ? { tests: 'pass', detail: `"${printable}" exited 0 after ${result.durationMs}ms.` }
     : {
         tests: 'fail',
-        detail: `"${command} test" exited ${result.exitCode} after ${result.durationMs}ms.`,
+        detail: `"${printable}" exited ${result.exitCode} after ${result.durationMs}ms.`,
       }
 }
 
 /**
- * Inspects the git working tree and, on request, the test suite.
+ * Inspects the git working tree and, when it can change the verdict, the
+ * project's verification command.
  *
  * The working tree is described first because a clean tree is a precondition
  * for treating a reproduction as trustworthy. When the tree is not a git
  * repository at all, the result is `unknown` rather than an error: the
  * gatekeeper must still be able to gate a change in an unpacked tarball.
  *
+ * The verification command is not optional. It used to be gated on an
+ * agent-supplied `runTests` flag, which meant the agent could decline to have
+ * its claim cross-checked and still be approved — see rule 5b' in
+ * `decision.ts`. It now runs whenever it can affect the outcome, which means
+ * whenever a reproduction was observed on a clean tree.
+ *
  * @param input Validated tool input.
  * @param deps Injected dependencies.
- * @returns The working tree and test verdicts, with an explanatory detail.
+ * @param options Whether the verification command is worth running, and how.
+ * @returns The working tree and verification verdicts, with an explanatory detail.
  */
-export async function inspectState(input: PreActionCheckInput, deps: Deps): Promise<StateInfo> {
-  const root = resolve(deps.cwd())
-  const runTests = input.runTests ?? false
+export async function inspectState(
+  input: PreActionCheckInput,
+  deps: Deps,
+  options: { runVerification: boolean; testCommand?: readonly string[]; testTimeoutMs?: number } = {
+    runVerification: false,
+  },
+): Promise<StateInfo> {
+  const root = await resolveRepoRoot(deps)
 
   // Confirm this is a git work tree before trusting any git output. `git status`
   // fails outside a repository, but relying on that failure alone would report a
@@ -236,12 +284,17 @@ export async function inspectState(input: PreActionCheckInput, deps: Deps): Prom
     treeDetail = `The git working tree has ${changed.length} uncommitted change(s): ${preview}${extra}`
   }
 
-  if (!runTests) {
-    logger.debug({ workingTree }, 'state: test run not requested')
+  if (!options.runVerification) {
+    logger.debug({ workingTree }, 'state: verification command not required for this verdict')
     return { workingTree, tests: 'skipped', detail: treeDetail }
   }
 
-  const suite = await runTestSuite(root, deps)
+  const suite = await runTestSuite(
+    root,
+    deps,
+    options.testCommand,
+    options.testTimeoutMs ?? TEST_TIMEOUT_MS,
+  )
   return {
     workingTree,
     tests: suite.tests,

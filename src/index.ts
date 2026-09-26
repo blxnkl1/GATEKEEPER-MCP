@@ -7,13 +7,28 @@
  * JSON-RPC to it over stdin and stdout, and kills it when the session ends.
  */
 
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
+import { describeConfigError } from './config/loader.js'
 import { logger } from './logger.js'
 import { createServer } from './server.js'
 
 async function main(): Promise<void> {
-  const server = createServer()
+  // A configuration file that cannot be used is a hard stop. Falling back to
+  // defaults here would silently revert a user's `mode: "enforced"` to advisory
+  // after a typo, which is the same class of quiet downgrade this project exists
+  // to prevent.
+  let server: McpServer
+  try {
+    server = createServer()
+  } catch (error) {
+    // stderr only: stdout is the JSON-RPC channel and must stay clean even here.
+    process.stderr.write(`${describeConfigError(error)}\n`)
+    process.exitCode = 78 // EX_CONFIG
+    return
+  }
+
   const transport = new StdioServerTransport()
 
   await server.connect(transport)

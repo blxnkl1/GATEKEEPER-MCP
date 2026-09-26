@@ -13,9 +13,17 @@
  * ## Reachability of `allow`
  *
  * `allow` is the only verdict that permits an edit, and it is reachable through
- * exactly one path: the reproduction was executed and produced the expected
- * outcome, the working tree is clean, and no green test suite contradicts the
- * reproduction. Every other combination denies or asks for more information.
+ * exactly one path: the reproduction was executed and exited non-zero, the
+ * working tree is clean, and the project's own verification command was run by
+ * the server and also failed. Every other combination denies or asks for more
+ * information.
+ *
+ * The non-zero exit is not negotiable by the caller, and neither is the
+ * verification command. The agent chooses the reproduction, so a non-zero exit
+ * on its own proves only that the agent's command failed; requiring the
+ * project's own tests to fail as well is what makes the claim about the
+ * repository falsifiable by something the agent does not control. Rule 5a''
+ * enforces the exit-code half at the point where permission is granted.
  */
 
 import { logger } from '../logger.js'
@@ -136,7 +144,7 @@ export function decide(input: PreActionCheckInput, evidence: Evidence, state: St
     })
   }
 
-  // From here the reproduction was executed and behaved as the agent predicted.
+  // From here the reproduction was executed and observed to exit non-zero.
   if (evidence.state === 'reproduced') {
     // Rule 5a: uncommitted changes make the observation untrustworthy.
     if (state.workingTree === 'dirty') {
@@ -161,23 +169,78 @@ export function decide(input: PreActionCheckInput, evidence: Evidence, state: St
       })
     }
 
-    // Rule 5b: a green suite contradicts the reproduction, so one of them is wrong.
-    if ((input.runTests ?? false) === true && state.tests === 'pass') {
+    // Rule 5b: a green verification surface contradicts the reproduction.
+    //
+    // Unconditional. This used to require an agent-supplied `runTests: true`,
+    // which meant the agent decided whether its own claim got cross-checked.
+    // Combined with the fact that the agent also chose the reproduction
+    // command, that made approval free: `{"command":"false"}` on a clean tree
+    // reached `allow`, because nothing ever ran the project's tests. The
+    // project has to be observed to be broken, and only the server can do that.
+    if (state.tests === 'pass') {
       return finalize({
         decision: 'request_info',
         reason:
-          'Existing tests pass despite the reproduction failing. Confirm that the reproduction and the test suite target the same behavior.',
+          "The project's own verification command passes even though the reproduction failed, so the reported problem is not confirmed by the project's tests.",
         nextSteps: [
-          'Check if the reproduction exercises code not covered by tests.',
-          'Consider adding a failing test before changing source.',
+          'Check whether the reproduction exercises code the test suite does not cover.',
+          'Add a failing test that captures the bug, then re-run pre_action_check.',
+        ],
+      })
+    }
+
+    // Rule 5b-prime: the project's verification surface could not be observed.
+    //
+    // `unknown` covers a repository with no test script, a missing test runner,
+    // a suite that timed out, and one that died abnormally. `skipped` covers a
+    // path that should not have reached here at all. None of them is evidence
+    // that the project is broken, and this project resolves uncertainty by
+    // refusing rather than by approving.
+    if (state.tests !== 'fail') {
+      return finalize({
+        decision: 'deny',
+        reason:
+          `The project's verification command did not confirm a failure (${state.tests}), so an approval would rest on the agent's word alone. ${state.detail}`.trim(),
+        nextSteps: [
+          'Give the project a verification command the gate can run, by adding a "test" script to package.json or setting `testCommand` in .gatekeeperrc.json.',
+          'Then re-run pre_action_check.',
+        ],
+      })
+    }
+
+    // Rule 5a'': `reproduced` must be backed by an observed non-zero exit.
+    // Defence in depth. Stage 1 only ever reports `reproduced` for a real
+    // non-zero exit, so this branch should be unreachable; it exists so the
+    // property holds at the point where permission is actually granted. A
+    // future change upstream cannot reopen the hole without also having to
+    // delete this rule.
+    //
+    // Deliberately covers the "no exit code was observed" case as well as the
+    // zero case. Unknown is not evidence: an approval must be justified by a
+    // failure that was actually seen to happen.
+    if (typeof evidence.exitCode !== 'number' || evidence.exitCode === 0) {
+      return finalize({
+        decision: 'deny',
+        reason:
+          'The reproduction command did not fail: a successful command is not evidence that a problem exists, so the change is not justified.',
+        nextSteps: [
+          'Confirm the reproduction command actually exercises the bug.',
+          'Provide a failing test or a command that exits non-zero on the bug.',
         ],
       })
     }
 
     // Rule 5c: the only path to an approved edit.
+    //
+    // Reached only when a non-zero exit was genuinely observed *and* the
+    // project's own verification command was run and also failed. The reason
+    // names both facts, because "the change is justified" is a claim about the
+    // repository and the reader is entitled to see which two observations
+    // support it. The server must never assert a failure it did not observe.
+    const observed = ` (exit code ${evidence.exitCode})`
     return finalize({
       decision: 'allow',
-      reason: 'Failure reproduced under a clean working tree. The change is justified.',
+      reason: `The reproduction failed as declared${observed}, the git working tree is clean, and the project's own verification command also failed. The change is justified.`,
       nextSteps: [
         'Make the minimal change that makes the reproduction pass.',
         'Do not refactor unrelated code.',
