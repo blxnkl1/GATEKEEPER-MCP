@@ -1,7 +1,7 @@
 {
   "name": "gatekeeper-mcp",
-  "version": "0.0.1",
-  "description": "Local MCP server that gates code-changing actions behind an evidence check, to prevent Action Bias in coding agents.",
+  "version": "1.0.0",
+  "description": "Local MCP server that prevents Action Bias in coding agents.",
   "type": "module",
   "bin": {
     "gatekeeper-mcp": "./dist/index.js"
@@ -9,7 +9,10 @@
   "engines": {
     "node": ">=20"
   },
-  "files": ["dist", "README.md", "LICENSE", "SKILL.md"],
+  "files": ["dist", "README.md", "LICENSE", "SKILL.md", "CHANGELOG.md"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
@@ -18,10 +21,27 @@
     "test:watch": "vitest",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
   },
-  "keywords": ["mcp", "model-context-protocol", "gatekeeper", "action-bias", "coding-agent"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "gatekeeper",
+    "action-bias",
+    "coding-agent"
+  ],
+  "author": "blxnkl1",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blxnkl1/GATEKEEPER-MCP.git"
+  },
+  "homepage": "https://github.com/blxnkl1/GATEKEEPER-MCP#readme",
+  "bugs": {
+    "url": "https://github.com/blxnkl1/GATEKEEPER-MCP/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "pino": "^9.0.0",
