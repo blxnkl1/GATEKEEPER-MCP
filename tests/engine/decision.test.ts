@@ -34,9 +34,15 @@ function evidence(state: Evidence['state'], overrides: Partial<Evidence> = {}): 
   return { state, detail: 'test detail', ...overrides }
 }
 
-/** Builds a state-inspection result. */
+/**
+ * Builds a state-inspection result.
+ *
+ * The default `tests` is `fail` because that is the only verification result
+ * from which `allow` is reachable: a clean tree plus a failing project
+ * verification command. Callers override it to exercise the blocking rules.
+ */
 function state(overrides: Partial<StateInfo> = {}): StateInfo {
-  return { workingTree: 'clean', tests: 'skipped', detail: 'test detail', ...overrides }
+  return { workingTree: 'clean', tests: 'fail', detail: 'test detail', ...overrides }
 }
 
 /** One row of the policy table. */
@@ -118,44 +124,63 @@ const CASES: Case[] = [
     expected: 'allow',
   },
   {
-    name: 'a failing suite does not block a reproduced failure',
+    name: 'a reproduced failure with a failing project suite allows the change',
     rule: '5c',
-    input: makeInput({ reproduction: { command: 'npm' }, runTests: true }),
+    input: makeInput({ reproduction: { command: 'npm' } }),
     evidence: evidence('reproduced', { exitCode: 1 }),
     state: state({ tests: 'fail' }),
     expected: 'allow',
   },
   {
-    name: 'a green suite contradicting the reproduction blocks it',
+    name: 'a green verification surface contradicting the reproduction blocks it',
     rule: '5b',
-    input: makeInput({ reproduction: { command: 'npm' }, runTests: true }),
+    input: makeInput({ reproduction: { command: 'npm' } }),
     evidence: evidence('reproduced', { exitCode: 1 }),
     state: state({ tests: 'pass' }),
     expected: 'request_info',
   },
   {
-    name: 'an unknown suite result does not block a reproduced failure',
-    rule: '5c',
-    input: makeInput({ reproduction: { command: 'npm' }, runTests: true }),
+    name: 'a green verification surface blocks even with no suite result requested',
+    rule: '5b',
+    input: makeInput({ reproduction: { command: 'npm' }, runTests: true } as Record<
+      string,
+      unknown
+    >),
     evidence: evidence('reproduced', { exitCode: 1 }),
-    state: state({ tests: 'unknown' }),
-    expected: 'allow',
+    state: state({ tests: 'pass' }),
+    expected: 'request_info',
   },
   {
-    name: 'a passing suite is ignored when tests were never requested',
-    rule: '5b guard',
+    name: 'an unobservable verification surface blocks a reproduced failure',
+    rule: '5b-prime',
+    input: makeInput({ reproduction: { command: 'npm' } }),
+    evidence: evidence('reproduced', { exitCode: 1 }),
+    state: state({ tests: 'unknown' }),
+    expected: 'deny',
+  },
+  {
+    name: 'a skipped verification surface blocks a reproduced failure',
+    rule: '5b-prime',
+    input: makeInput({ reproduction: { command: 'npm' } }),
+    evidence: evidence('reproduced', { exitCode: 1 }),
+    state: state({ tests: 'skipped' }),
+    expected: 'deny',
+  },
+  {
+    name: 'a passing suite is no longer ignorable by omitting runTests',
+    rule: '5b',
     input: makeInput({ reproduction: { command: 'npm' } }),
     evidence: evidence('reproduced', { exitCode: 1 }),
     state: state({ tests: 'pass' }),
-    expected: 'allow',
+    expected: 'request_info',
   },
   {
-    name: 'an inverted reproduction that behaves as expected allows the change',
-    rule: '5c',
+    name: 'a zero exit is never failure evidence, whatever the agent declared',
+    rule: "5a''",
     input: makeInput({ reproduction: { command: 'node', expectFailure: false } }),
     evidence: evidence('reproduced', { exitCode: 0 }),
     state: state(),
-    expected: 'allow',
+    expected: 'deny',
   },
 ]
 
@@ -230,11 +255,12 @@ describe('decide: allow reachability', () => {
   const TREES: StateInfo['workingTree'][] = ['clean', 'dirty', 'unknown']
   const TESTS: StateInfo['tests'][] = ['pass', 'fail', 'skipped', 'unknown']
 
-  it('never allows anything unless the failure was reproduced on a clean tree', () => {
+  it('never allows anything unless a non-zero failure was reproduced on a clean tree', () => {
     const unjustified: string[] = []
 
     // Every combination of what the agent supplied, what the reproduction
-    // found, and what the repository looked like.
+    // found, and what the repository looked like. `reproduced` is always paired
+    // with a real non-zero exit code, because rule 5a'' denies anything else.
     for (const withText of [false, true]) {
       for (const withReproduction of [false, true]) {
         for (const runTests of [false, true]) {
@@ -247,7 +273,13 @@ describe('decide: allow reachability', () => {
                   runTests,
                 })
 
-                const result = decide(input, evidence(evidenceState), state({ workingTree, tests }))
+                const result = decide(
+                  input,
+                  evidenceState === 'reproduced'
+                    ? evidence(evidenceState, { exitCode: 1 })
+                    : evidence(evidenceState),
+                  state({ workingTree, tests }),
+                )
 
                 // The single combination the policy is allowed to approve.
                 const justified =
@@ -271,8 +303,13 @@ describe('decide: allow reachability', () => {
   it('reaches allow through exactly one evidence state', () => {
     const allowing = EVIDENCE_STATES.filter(
       (evidenceState) =>
-        decide(makeInput({ reproduction: { command: 'npm' } }), evidence(evidenceState), state())
-          .decision === 'allow',
+        decide(
+          makeInput({ reproduction: { command: 'npm' } }),
+          evidenceState === 'reproduced'
+            ? evidence(evidenceState, { exitCode: 1 })
+            : evidence(evidenceState),
+          state(),
+        ).decision === 'allow',
     )
 
     expect(allowing).toEqual(['reproduced'])
@@ -287,6 +324,105 @@ describe('decide: allow reachability', () => {
       )
 
       expect(result.decision).toBe('request_info')
+    }
+  })
+
+  it('never allows a zero exit, whatever the agent declared it expected', () => {
+    // Defence in depth. Stage 1 already refuses to report `reproduced` for a
+    // zero exit; this pins the property at the point where permission is
+    // actually granted, so an upstream change cannot quietly reopen it.
+    const unjustified: string[] = []
+
+    for (const expectFailure of [true, false]) {
+      for (const withText of [false, true]) {
+        for (const runTests of [false, true]) {
+          for (const workingTree of TREES) {
+            for (const tests of TESTS) {
+              const input = makeInput({
+                reproduction: { command: 'npm', expectFailure },
+                ...(withText ? { evidenceOfProblem: 'It crashes on start-up.' } : {}),
+                runTests,
+              })
+
+              const result = decide(
+                input,
+                evidence('reproduced', { exitCode: 0 }),
+                state({ workingTree, tests }),
+              )
+
+              if (result.decision === 'allow') {
+                unjustified.push(
+                  `expectFailure=${expectFailure}/text=${withText}/runTests=${runTests}/${workingTree}/${tests}`,
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(unjustified).toEqual([])
+  })
+
+  it('only allows when a genuine non-zero exit was actually observed', () => {
+    // Exhaustive over the exit-code shapes a closed child can produce. Zero and
+    // "no code at all" both mean nothing failed, so neither may reach `allow`.
+    for (const exitCode of [0, 1, 2, 127, undefined]) {
+      const result = decide(
+        makeInput({ reproduction: { command: 'npm' } }),
+        evidence('reproduced', exitCode === undefined ? {} : { exitCode }),
+        state(),
+      )
+
+      if (exitCode === undefined) {
+        expect(result.decision, 'no exit code observed').not.toBe('allow')
+        continue
+      }
+      expect(result.decision, `exitCode=${exitCode}`).toBe(exitCode === 0 ? 'deny' : 'allow')
+    }
+  })
+})
+
+describe('decide: the allow reason describes the evidence that caused it', () => {
+  it('reports the observed exit code on an allow', () => {
+    const result = decide(
+      makeInput({ reproduction: { command: 'npm' } }),
+      evidence('reproduced', { exitCode: 1 }),
+      state(),
+    )
+
+    expect(result.decision).toBe('allow')
+    expect(result.reason).toContain('1')
+    expect(result.reason).toMatch(/failed as declared/i)
+  })
+
+  it('never claims a failure was reproduced when the command succeeded', () => {
+    // The exact defect from the security report: the old rule 5c reason read
+    // "Failure reproduced under a clean working tree" on a path where the
+    // command had exited zero.
+    for (const expectFailure of [true, false]) {
+      const result = decide(
+        makeInput({ reproduction: { command: 'npm', expectFailure } }),
+        evidence('reproduced', { exitCode: 0 }),
+        state(),
+      )
+
+      expect(result.decision, `expectFailure=${expectFailure}`).not.toBe('allow')
+      expect(result.reason, `expectFailure=${expectFailure}`).not.toMatch(/failure reproduced/i)
+      expect(result.reason, `expectFailure=${expectFailure}`).toMatch(
+        /did not fail|not evidence|successful/i,
+      )
+    }
+  })
+
+  it('does not claim a reproduced failure on any non-allow verdict', () => {
+    for (const testCase of CASES) {
+      const result = decide(testCase.input, testCase.evidence, testCase.state)
+
+      if (result.decision === 'allow') {
+        continue
+      }
+      expect(result.reason, testCase.name).not.toMatch(/failure reproduced/i)
     }
   })
 })

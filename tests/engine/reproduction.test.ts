@@ -9,7 +9,11 @@
 import { describe, expect, it } from 'vitest'
 
 import { MAX_OUTPUT_BYTES, executeCommand, runReproduction } from '../../src/engine/reproduction.js'
-import { preActionCheckInputSchema } from '../../src/schemas/pre_action_check.js'
+import {
+  DEFAULT_DENYLIST,
+  createReproductionSchema,
+  preActionCheckInputSchema,
+} from '../../src/schemas/pre_action_check.js'
 import type { PreActionCheckInput } from '../../src/types/index.js'
 import { exit, fakeSpawner, hang, makeDeps, spawnFailure } from './fakes.js'
 
@@ -84,19 +88,7 @@ describe('runReproduction: exit code interpretation', () => {
     expect(result.detail).toContain('ETIMEDOUT')
   })
 
-  it('reports reproduced when a command expected to succeed exits zero', async () => {
-    const { spawn } = fakeSpawner(() => exit(0))
-
-    const result = await runReproduction(
-      makeInput({ reproduction: { command: 'node', args: ['assert.js'], expectFailure: false } }),
-      makeDeps({ cwd: () => ROOT, spawn }),
-    )
-
-    expect(result.state).toBe('reproduced')
-    expect(result.detail).toMatch(/expected outcome/i)
-  })
-
-  it('reports not_reproduced when a command expected to succeed exits non-zero', async () => {
+  it('reports reproduced when a command exits non-zero even if it was expected to succeed', async () => {
     const { spawn } = fakeSpawner(() => exit(2))
 
     const result = await runReproduction(
@@ -104,22 +96,161 @@ describe('runReproduction: exit code interpretation', () => {
       makeDeps({ cwd: () => ROOT, spawn }),
     )
 
-    expect(result.state).toBe('not_reproduced')
+    // The declared expectation does not get a vote. A non-zero exit is a
+    // failure that was actually observed, whatever the agent predicted.
+    expect(result.state).toBe('reproduced')
     expect(result.exitCode).toBe(2)
   })
 })
 
-describe('runReproduction: command validation', () => {
-  it('refuses a command containing shell metacharacters', async () => {
-    const { spawn, calls } = fakeSpawner(() => exit(1))
+/**
+ * The invariant this block exists to protect:
+ *
+ *   a successful execution is never failure evidence.
+ *
+ * `expectFailure` is descriptive metadata. It records what the agent expected
+ * and it is echoed back in the detail string, but it must never be able to
+ * convert a zero exit into `reproduced`, because `reproduced` is the only state
+ * the decision engine can turn into `allow`.
+ */
+describe('runReproduction: a successful command is never failure evidence', () => {
+  // The three payloads from the security report, each of which returned `allow`
+  // before the invariant was restored. Only the exit code matters, so each is
+  // scripted to succeed exactly as the real command would.
+  const SUCCESSFUL_COMMANDS: Array<{ label: string; reproduction: Record<string, unknown> }> = [
+    { label: 'true', reproduction: { command: 'true', expectFailure: false } },
+    {
+      label: 'echo',
+      reproduction: { command: 'echo', args: ['test'], expectFailure: false },
+    },
+    {
+      label: 'git --version',
+      reproduction: { command: 'git', args: ['--version'], expectFailure: false },
+    },
+  ]
+
+  for (const { label, reproduction } of SUCCESSFUL_COMMANDS) {
+    it(`does not report reproduced for a successful "${label}" with expectFailure:false`, async () => {
+      const { spawn } = fakeSpawner(() => exit(0, { stdout: 'output\n' }))
+
+      const result = await runReproduction(
+        makeInput({ reproduction }),
+        makeDeps({ cwd: () => ROOT, spawn }),
+      )
+
+      expect(result.state).toBe('not_reproduced')
+      expect(result.state).not.toBe('reproduced')
+    })
+  }
+
+  it('reports not_reproduced for a zero exit under the default expectation too', async () => {
+    const { spawn } = fakeSpawner(() => exit(0))
 
     const result = await runReproduction(
-      makeInput({ reproduction: { command: 'npm;rm -rf /' } }),
+      makeInput({ reproduction: { command: 'node' } }),
+      makeDeps({ cwd: () => ROOT, spawn }),
+    )
+
+    expect(result.state).toBe('not_reproduced')
+  })
+
+  it('ignores expectFailure:false for every zero exit code it could be given', async () => {
+    // Exhaustive over the only two values a boolean can take, so the property
+    // does not rest on a single hand-picked payload.
+    for (const expectFailure of [true, false]) {
+      const { spawn } = fakeSpawner(() => exit(0))
+
+      const result = await runReproduction(
+        makeInput({ reproduction: { command: 'node', expectFailure } }),
+        makeDeps({ cwd: () => ROOT, spawn }),
+      )
+
+      expect(result.state, `expectFailure=${expectFailure}`).toBe('not_reproduced')
+    }
+  })
+
+  it('never reports reproduced for any non-failing outcome', async () => {
+    // Timeout and spawn failure are not failures of the code under test either,
+    // so they must not be laundered into failure evidence by any expectation.
+    for (const expectFailure of [true, false]) {
+      const timedOut = await runReproduction(
+        makeInput({
+          reproduction: { command: 'node', timeoutMs: 1000, expectFailure },
+        }),
+        makeDeps({ cwd: () => ROOT, spawn: fakeSpawner(() => hang()).spawn }),
+      )
+      expect(timedOut.state, `timeout expectFailure=${expectFailure}`).toBe('timeout')
+
+      const missing = await runReproduction(
+        makeInput({ reproduction: { command: 'node', expectFailure } }),
+        makeDeps({ cwd: () => ROOT, spawn: fakeSpawner(() => spawnFailure('ENOENT')).spawn }),
+      )
+      expect(missing.state, `ENOENT expectFailure=${expectFailure}`).toBe('unverifiable')
+    }
+  })
+
+  it('explains in the detail that a successful command is not failure evidence', async () => {
+    const { spawn } = fakeSpawner(() => exit(0))
+
+    const result = await runReproduction(
+      makeInput({ reproduction: { command: 'true', expectFailure: false } }),
+      makeDeps({ cwd: () => ROOT, spawn }),
+    )
+
+    expect(result.detail).toMatch(/no failure observed/i)
+    expect(result.detail).not.toMatch(/reproduction succeeded/i)
+  })
+})
+
+describe('runReproduction: command validation', () => {
+  it('refuses a metacharacter command that the denylist does not already catch', async () => {
+    const { spawn, calls } = fakeSpawner(() => exit(1))
+
+    // The schema's denylist refuses the obvious destructive forms before the
+    // engine is reached, so this exercises the engine's own metacharacter guard
+    // with a payload the denylist has no rule for. The guard is defence in depth
+    // behind the denylist, not a replacement for it.
+    //
+    // Note: the engine's character class does not include the pipe. That is inert
+    // here because the runner never uses a shell, but it is an incomplete guard
+    // and is reported rather than quietly worked around.
+    const result = await runReproduction(
+      makeInput({ reproduction: { command: 'pytest;tee' } }),
       makeDeps({ cwd: () => ROOT, spawn }),
     )
 
     expect(result.state).toBe('unverifiable')
     expect(result.detail).toMatch(/metacharacters/i)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('leaves denylist enforcement to the tool layer, so rejections stay auditable', () => {
+    // Layering. The advertised MCP schema deliberately omits the denylist,
+    // because the SDK validates arguments before the tool handler runs and a
+    // rejection there would never produce a `denylist_rejected` audit event.
+    // The engine is the second line of defence, not the first.
+    expect(() =>
+      makeInput({ reproduction: { command: 'npm;rm -rf /' } } as Record<string, unknown>),
+    ).not.toThrow()
+
+    // The refusal still happens, one layer up, against the active denylist.
+    const parsed = createReproductionSchema(DEFAULT_DENYLIST).safeParse({
+      command: 'npm;rm -rf /',
+      args: [],
+    })
+
+    expect(parsed.success).toBe(false)
+  })
+
+  it('spawns nothing for a refused command, whichever layer catches it', async () => {
+    const { spawn, calls } = fakeSpawner(() => exit(1))
+
+    const result = await runReproduction(
+      makeInput({ reproduction: { command: 'npm;rm -rf /' } } as Record<string, unknown>),
+      makeDeps({ cwd: () => ROOT, spawn }),
+    )
+
+    expect(result.state).toBe('unverifiable')
     expect(calls).toHaveLength(0)
   })
 

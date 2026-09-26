@@ -145,11 +145,13 @@ describe('inspectState: working tree', () => {
   })
 })
 
-describe('inspectState: test suite', () => {
-  it('skips the test suite when runTests is not requested', async () => {
+describe('inspectState: verification command', () => {
+  it('skips the verification command when it cannot affect the verdict', async () => {
     const { spawn, calls } = fakeSpawner(gitRoutes(CLEAN_TREE))
 
-    const result = await inspectState(makeInput(), makeDeps({ cwd: () => ROOT, spawn }))
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => ROOT, spawn }), {
+      runVerification: false,
+    })
 
     expect(result.tests).toBe('skipped')
     // Only the two git commands ran; no package manager was invoked.
@@ -157,15 +159,24 @@ describe('inspectState: test suite', () => {
     expect(calls.every((call) => call.command === 'git')).toBe(true)
   })
 
-  it('skips the test suite when runTests is explicitly false', async () => {
-    const { spawn } = fakeSpawner(gitRoutes(CLEAN_TREE))
-
-    const result = await inspectState(
-      makeInput({ runTests: false }),
-      makeDeps({ cwd: () => ROOT, spawn }),
+  it('is no longer suppressible by an agent-supplied runTests flag', async () => {
+    // The flag used to let the agent decline the cross-check. It is gone from
+    // the schema, and a caller still sending it cannot switch the run off.
+    const { spawn, calls } = fakeSpawner(
+      byCommand({
+        git: (call) => (call.args.includes('status') ? CLEAN_TREE : INSIDE_WORK_TREE),
+        npm: exit(0),
+      }),
     )
 
-    expect(result.tests).toBe('skipped')
+    const result = await inspectState(
+      makeInput({ runTests: false } as Record<string, unknown>),
+      makeDeps({ cwd: () => process.cwd(), spawn }),
+      { runVerification: true },
+    )
+
+    expect(result.tests).toBe('pass')
+    expect(calls.some((call) => call.command === 'npm')).toBe(true)
   })
 
   it('reports pass when the suite exits zero', async () => {
@@ -178,10 +189,9 @@ describe('inspectState: test suite', () => {
       }),
     )
 
-    const result = await inspectState(
-      makeInput({ runTests: true }),
-      makeDeps({ cwd: () => process.cwd(), spawn }),
-    )
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+    })
 
     expect(result.tests).toBe('pass')
     expect(result.detail).toContain('exited 0')
@@ -196,10 +206,9 @@ describe('inspectState: test suite', () => {
       }),
     )
 
-    const result = await inspectState(
-      makeInput({ runTests: true }),
-      makeDeps({ cwd: () => process.cwd(), spawn }),
-    )
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+    })
 
     expect(result.tests).toBe('fail')
     expect(result.detail).toContain('exited 1')
@@ -213,10 +222,9 @@ describe('inspectState: test suite', () => {
       }),
     )
 
-    const result = await inspectState(
-      makeInput({ runTests: true }),
-      makeDeps({ cwd: () => process.cwd(), spawn }),
-    )
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+    })
 
     expect(result.tests).toBe('unknown')
     expect(result.detail).toMatch(/Could not start/i)
@@ -226,24 +234,61 @@ describe('inspectState: test suite', () => {
     const { spawn, calls } = fakeSpawner(gitRoutes(CLEAN_TREE))
 
     const result = await inspectState(
-      makeInput({ runTests: true }),
+      makeInput(),
       // ROOT has no package.json on disk, so no runner can be recognised.
       makeDeps({ cwd: () => ROOT, spawn }),
+      { runVerification: true },
     )
 
     expect(result.tests).toBe('unknown')
-    expect(result.detail).toMatch(/no test runner was recognised/i)
+    expect(result.detail).toMatch(/no verification command is known/i)
     // No package manager was started.
     expect(calls.every((call) => call.command === 'git')).toBe(true)
   })
 
-  it('skips the test run when the directory is not a git repository', async () => {
+  it('uses an operator-configured verification command in preference to detection', async () => {
+    const { spawn, calls } = fakeSpawner(
+      byCommand({
+        git: (call) => (call.args.includes('status') ? CLEAN_TREE : INSIDE_WORK_TREE),
+        // A runner the auto-detection heuristic would never have found.
+        pytest: exit(1),
+        npm: exit(0),
+      }),
+    )
+
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+      testCommand: ['pytest', '-q'],
+    })
+
+    expect(result.tests).toBe('fail')
+    expect(calls.some((call) => call.command === 'pytest' && call.args.includes('-q'))).toBe(true)
+    expect(calls.some((call) => call.command === 'npm')).toBe(false)
+  })
+
+  it('never runs a configured verification command through a shell', async () => {
+    const { spawn, calls } = fakeSpawner(
+      byCommand({
+        git: (call) => (call.args.includes('status') ? CLEAN_TREE : INSIDE_WORK_TREE),
+        pytest: exit(1),
+      }),
+    )
+
+    await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+      testCommand: ['pytest', '-q'],
+    })
+
+    const suiteCall = calls.find((call) => call.command === 'pytest')
+    expect(suiteCall?.shell).toBe(false)
+  })
+
+  it('skips the verification command when the directory is not a git repository', async () => {
     const { spawn, calls } = fakeSpawner(gitRoutes({}, { exitCode: 128 }))
 
-    const result = await inspectState(
-      makeInput({ runTests: true }),
-      makeDeps({ cwd: () => process.cwd(), spawn }),
-    )
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+    })
 
     expect(result.tests).toBe('skipped')
     expect(calls).toHaveLength(1)
@@ -258,10 +303,9 @@ describe('inspectState: test suite', () => {
       }),
     )
 
-    const result = await inspectState(
-      makeInput({ runTests: true }),
-      makeDeps({ cwd: () => process.cwd(), spawn }),
-    )
+    const result = await inspectState(makeInput(), makeDeps({ cwd: () => process.cwd(), spawn }), {
+      runVerification: true,
+    })
 
     expect(result.workingTree).toBe('dirty')
     expect(result.tests).toBe('pass')

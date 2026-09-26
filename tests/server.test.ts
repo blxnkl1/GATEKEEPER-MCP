@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { createServer } from '../src/server.js'
 import { PRE_ACTION_CHECK_TOOL_NAME } from '../src/tools/pre_action_check.js'
+import { VERIFY_DECISION_TOOL_NAME } from '../src/tools/verify_decision.js'
 
 /** Clients opened by a test, closed during teardown. */
 const openClients: Client[] = []
@@ -56,6 +57,29 @@ describe('createServer', () => {
     expect(toolNames).toContain(PRE_ACTION_CHECK_TOOL_NAME)
   })
 
+  it('exposes verify_decision in the tool list', async () => {
+    const server = createServer()
+    const client = await connectClient(server)
+
+    const { tools } = await client.listTools()
+
+    expect(tools.map((tool) => tool.name)).toContain(VERIFY_DECISION_TOOL_NAME)
+  })
+
+  it('issues a nonce on every pre_action_check response', async () => {
+    const server = createServer()
+    const client = await connectClient(server)
+
+    const result = await client.callTool({
+      name: PRE_ACTION_CHECK_TOOL_NAME,
+      arguments: { taskDescription: 'Add a retry', proposedChange: 'Wrap the call.' },
+    })
+    const payload = JSON.parse(String(result.content[0]?.text)) as { nonce?: string }
+
+    expect(typeof payload.nonce).toBe('string')
+    expect(payload.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/)
+  })
+
   it('advertises the reproduction input in the tool description', async () => {
     const server = createServer()
     const client = await connectClient(server)
@@ -82,10 +106,45 @@ describe('createServer', () => {
         'affectedFiles',
         'evidenceOfProblem',
         'reproduction',
-        'runTests',
         'taskDescription',
         'proposedChange',
       ].sort(),
+    )
+  })
+
+  it('no longer advertises the runTests opt-out', async () => {
+    // The flag let the agent decide whether its claim got cross-checked, which
+    // combined with the agent also choosing the reproduction command to make
+    // `allow` free. It must not reappear in the advertised contract.
+    const server = createServer()
+    const client = await connectClient(server)
+
+    const { tools } = await client.listTools()
+    const tool = tools.find((candidate) => candidate.name === PRE_ACTION_CHECK_TOOL_NAME)
+    const properties = (tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties
+
+    expect(properties ?? {}).not.toHaveProperty('runTests')
+  })
+
+  it('does not put the denylist in the advertised schema, so rejections stay auditable', async () => {
+    // The SDK validates arguments against the advertised schema before the
+    // handler runs. A denylist folded in here made `denylist_rejected` events
+    // unreachable, leaving the audit trail blind to the commonest rejection.
+    const server = createServer()
+    const client = await connectClient(server)
+
+    const { tools } = await client.listTools()
+    const tool = tools.find((candidate) => candidate.name === PRE_ACTION_CHECK_TOOL_NAME)
+    const properties = (tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)
+      ?.properties
+    const reproduction = properties?.reproduction as
+      | { properties?: Record<string, unknown> }
+      | undefined
+
+    // Shape is advertised: the fields an agent has to know about.
+    expect(Object.keys(reproduction?.properties ?? {}).sort()).toEqual(
+      ['args', 'command', 'cwd', 'expectFailure', 'timeoutMs'].sort(),
     )
   })
 })
