@@ -1,0 +1,97 @@
+# Continuous integration for pull requests and pushes to main.
+#
+# This workflow never publishes. Publishing happens only from release.yml, and
+# only on a version tag.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Security invariant tests
+        run: npx vitest run tests/security
+        # `npm test` already runs these. This step exists so a failure names the
+        # invariant rather than a test file: the ALLOW contract is the one thing
+        # in this repository that must never regress silently.
+
+      - name: Build
+        run: npm run build
+
+      # The protocol test is deterministic, needs no secrets, no LLM and no
+      # network, and finishes in about a second, so it belongs on every commit.
+      # It asserts the server still speaks MCP over stdio and still denies an
+      # unevidenced change, which is the invariant everything else rests on.
+      # The agent-integration script is deliberately NOT run here: it needs a
+      # real model and is local-only.
+      - name: MCP protocol test
+        run: bash scripts/e2e/mcp-protocol.sh
+
+      # The guarantee tests read the source and package.json and assert that no
+      # network module was imported, no credential env var is read, and every
+      # runtime dependency is permissively licensed. They are deterministic, fast,
+      # and need no secrets. If one fails, a promise made in ADR 0005 has been
+      # broken in code.
+      - name: Guarantees tests
+        run: npx vitest run tests/guarantees
+
+      - name: Verify the publishable tarball
+        run: |
+          # Guards against shipping a package that is missing a file the
+          # published entrypoint needs, or that has accidentally grown one it
+          # should not carry.
+          npm pack --dry-run
+          node -e "
+            const { execSync } = require('node:child_process')
+            const out = execSync('npm pack --dry-run --json', { encoding: 'utf8' })
+            const files = JSON.parse(out)[0].files.map((f) => f.path.split('/')[0])
+            const allowed = new Set(['dist', 'package.json', 'README.md', 'LICENSE', 'SKILL.md', 'CHANGELOG.md'])
+            const extra = [...new Set(files)].filter((f) => !allowed.has(f))
+            if (extra.length > 0) {
+              console.error('unexpected files in tarball: ' + extra.join(', '))
+              process.exit(1)
+            }
+            console.log('tarball contents are within the allowlist')
+          "
+
+      - name: Installer dry run
+        run: bash scripts/install.sh --dry-run
+
+      - name: Installer tests
+        run: bash scripts/install.test.sh

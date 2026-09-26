@@ -26,6 +26,10 @@
 
 set -euo pipefail
 
+# Shared with the e2e scripts, so the portable macOS timeout exists once.
+# shellcheck source=scripts/e2e/lib/timeout.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e/lib/timeout.sh"
+
 # The name the server is registered under. Override if you used another.
 readonly SERVER_NAME="${GATEKEEPER_SERVER_NAME:-gatekeeper}"
 
@@ -63,16 +67,10 @@ Exit codes:
 EOF
 }
 
-# Runs a command with a timeout, tolerating systems without the `timeout` binary
-# (macOS ships no coreutils `timeout` by default).
-run_with_timeout() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$PROBE_TIMEOUT" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$PROBE_TIMEOUT" "$@"
-  else
-    "$@"
-  fi
+# Runs a command with a timeout. The implementation is shared with the e2e
+# scripts so there is exactly one copy of the macOS fallback logic.
+run_probe() {
+  run_with_timeout "$PROBE_TIMEOUT" "$@"
 }
 
 # Echoes the non-interactive command that lists MCP servers for a given agent.
@@ -151,7 +149,7 @@ main() {
   # as "cannot check" rather than as "not registered". Those are very different
   # answers and conflating them is how a broken setup gets dismissed.
   local help_text=""
-  if ! help_text="$(run_with_timeout "$agent_path" --help 2>&1)"; then
+  if ! help_text="$(run_probe "$agent_path" --help 2>&1)"; then
     log "could not run '${agent_name} --help'; treating as uncheckable"
     fail "agent CLI did not respond to --help"
   fi
@@ -165,7 +163,7 @@ main() {
   subcommand="$(list_command_for "$agent_name")"
 
   local listing=""
-  if ! listing="$(run_with_timeout "$agent_path" $subcommand 2>&1)"; then
+  if ! listing="$(run_probe "$agent_path" $subcommand 2>&1)"; then
     log "'${agent_name} ${subcommand}' failed. Output:"
     log "${listing}"
     fail "cannot verify: the listing command did not succeed"

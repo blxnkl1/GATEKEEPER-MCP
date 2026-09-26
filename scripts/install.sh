@@ -1,108 +1,233 @@
 #!/usr/bin/env bash
 #
-# Installer for GATEKEEPER MCP.
+# GATEKEEPER MCP - installer
+# Copyright (c) 2026 blxnkl1
+# SPDX-License-Identifier: MIT
 #
-# Installs dependencies, builds the project, and prints the configuration needed
-# to wire the server into a coding agent. Run it from a clone of the repository.
+# Installs GATEKEEPER MCP globally from npm. This script does not clone the
+# repository: the published package already contains the compiled server, so
+# installing it is a single npm operation.
+#
+# To work on the project itself, clone instead:
+#   git clone https://github.com/blxnkl1/GATEKEEPER-MCP.git
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/blxnkl1/GATEKEEPER-MCP/main/scripts/install.sh | bash
+#
+#   bash install.sh [options]
+#
+# Options:
+#   --version <tag>   Version to install. Default: latest.
+#   --prefix <dir>    Install prefix. Default: $HOME/.local
+#   --dry-run         Print what would happen, then exit without changing anything.
+#   -h, --help        Show this help.
 
 set -euo pipefail
 
-readonly REQUIRED_NODE_MAJOR=20
-readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly PACKAGE_NAME="gatekeeper-mcp"
+readonly REPO_URL="https://github.com/blxnkl1/GATEKEEPER-MCP"
+readonly MIN_NODE_MAJOR=20
 
-log() {
-  # Logs go to stderr so this script stays pipeable and never pollutes stdout.
-  printf '%s\n' "$*" >&2
-}
+VERSION="latest"
+PREFIX="${HOME}/.local"
+DRY_RUN="false"
 
+info() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 fail() {
-  log "error: $*"
+  printf 'error: %s\n' "$*" >&2
   exit 1
 }
 
-# 1. Verify the runtime.
-check_node_version() {
+usage() {
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --version)
+        [ "$#" -ge 2 ] || fail "--version requires a value"
+        VERSION="$2"
+        shift 2
+        ;;
+      --version=*)
+        VERSION="${1#*=}"
+        shift
+        ;;
+      --prefix)
+        [ "$#" -ge 2 ] || fail "--prefix requires a value"
+        PREFIX="$2"
+        shift 2
+        ;;
+      --prefix=*)
+        PREFIX="${1#*=}"
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN="true"
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown option: $1 (try --help)"
+        ;;
+    esac
+  done
+}
+
+# The server is a Node program and there is no meaningful fallback for a missing
+# runtime, so this is a hard stop rather than a warning.
+check_os() {
+  local kernel
+  kernel="$(uname -s)"
+  case "$kernel" in
+    Darwin)
+      info "detected OS: macOS"
+      ;;
+    Linux)
+      info "detected OS: Linux"
+      ;;
+    *)
+      fail "unsupported operating system: ${kernel}. This installer supports macOS and Linux only. On any other platform, install with: npm install -g ${PACKAGE_NAME}"
+      ;;
+  esac
+}
+
+check_node() {
   if ! command -v node >/dev/null 2>&1; then
-    fail "node is not installed. Install Node.js ${REQUIRED_NODE_MAJOR} or newer from https://nodejs.org"
+    fail "Node.js ${MIN_NODE_MAJOR} or newer is required, but node was not found.
+Install it, then re-run this script:
+  macOS         brew install node
+  Debian/Ubuntu sudo apt-get install -y nodejs npm
+  Fedora        sudo dnf install -y nodejs
+  Or download it from https://nodejs.org and re-open your shell."
   fi
 
-  local node_version node_major
-  node_version="$(node --version)"
-  node_major="${node_version#v}"
-  node_major="${node_major%%.*}"
+  local raw major
+  raw="$(node --version)"
+  major="${raw#v}"
+  major="${major%%.*}"
 
-  if ! [[ "$node_major" =~ ^[0-9]+$ ]]; then
-    fail "could not parse the Node.js version from '${node_version}'"
+  if ! [[ "$major" =~ ^[0-9]+$ ]]; then
+    fail "could not parse the Node.js version from '${raw}'"
   fi
 
-  if (( node_major < REQUIRED_NODE_MAJOR )); then
-    fail "Node.js ${REQUIRED_NODE_MAJOR} or newer is required, found ${node_version}"
+  if [ "$major" -lt "$MIN_NODE_MAJOR" ]; then
+    fail "Node.js ${MIN_NODE_MAJOR} or newer is required, found ${raw}.
+Upgrade Node.js, then re-run this script:
+  macOS         brew upgrade node
+  Debian/Ubuntu sudo apt-get install -y nodejs npm
+  Or download it from https://nodejs.org and re-open your shell."
   fi
 
-  log "node ${node_version} is supported"
+  info "node ${raw} is supported"
 }
 
-# 2. Install and build.
-build_project() {
-  log "installing dependencies"
-  (cd "$PROJECT_DIR" && npm ci)
+install_package() {
+  # The version spec is built here so a "latest" install and a pinned install go
+  # through exactly the same code path.
+  local spec="${PACKAGE_NAME}"
+  if [ "$VERSION" != "latest" ]; then
+    spec="${PACKAGE_NAME}@${VERSION}"
+  fi
 
-  log "building"
-  (cd "$PROJECT_DIR" && npm run build)
+  if [ "$DRY_RUN" = "true" ]; then
+    info "[dry-run] would run: npm install -g --prefix ${PREFIX} ${spec}"
+    return 0
+  fi
 
-  log "verifying the build"
-  (cd "$PROJECT_DIR" && npm run typecheck)
-
-  log "gatekeeper-mcp installed in ${PROJECT_DIR}"
+  info "installing ${spec}"
+  if ! npm install -g --prefix "$PREFIX" "$spec"; then
+    fail "npm install failed. If you do not have write access to ${PREFIX}, choose another prefix: bash install.sh --prefix ~/.local"
+  fi
+  info "installed ${spec} into ${PREFIX}"
 }
 
-# 3. Tell the user how to wire it into their agent.
+print_bin_hint() {
+  local bindir="${PREFIX}/bin"
+  if [ "$DRY_RUN" = "true" ]; then
+    info "[dry-run] would verify with: ${bindir}/gatekeeper-mcp"
+  else
+    info "installed executable: ${bindir}/gatekeeper-mcp"
+  fi
+
+  case ":${PATH}:" in
+    *":${bindir}:"*) ;;
+    *)
+      warn "${bindir} is not on your PATH. Add it:"
+      warn "  export PATH=\"${bindir}:\$PATH\""
+      ;;
+  esac
+}
+
 print_next_steps() {
-  local bin_path="${PROJECT_DIR}/dist/index.js"
+  local bindir="${PREFIX}/bin"
+  local bin="${bindir}/gatekeeper-mcp"
 
-  cat >&2 <<EOF
+  cat <<EOF
 
-GATEKEEPER MCP is installed.
+GATEKEEPER MCP is a local MCP server. It speaks JSON-RPC on stdio, so your
+agent starts it as a child process. You do not run it by hand.
 
-The server speaks JSON-RPC on stdio, so an agent runs it as a local process.
-Point your agent at:
+The package was just installed. Point your agent at the installed binary:
 
-  ${bin_path}
+  OpenCode
+    opencode mcp add gatekeeper -- ${bin}
 
-While Phase 1 is in progress the server is not published to npm, so use the
-absolute path above instead of "npx gatekeeper-mcp".
+  Claude Code
+    claude mcp add gatekeeper -- ${bin}
 
-Wire it into your agent:
+  Hermes Agent
+    hermes mcp add gatekeeper --command ${bin}
+    (Hermes connects first, lists the tools it finds, then asks which to enable.
+    Answer Y to enable pre_action_check.)
 
-  OpenCode      add to opencode.json:
-                {
-                  "mcp": {
-                    "gatekeeper": {
-                      "type": "local",
-                      "command": ["node", "${bin_path}"],
-                      "enabled": true
-                    }
-                  }
-                }
+  Codex
+    Unverified. See ${REPO_URL}/blob/main/docs/agents/codex.md
 
-  Codex         add to ~/.codex/config.toml:
-                [mcp_servers.gatekeeper]
-                command = "node"
-                args = ["${bin_path}"]
+Confirm it is registered:
 
-  Claude Code   claude mcp add gatekeeper -- node ${bin_path}
+  opencode mcp list      # or: claude mcp list   /   hermes mcp list
 
-  Hermes Agent  hermes mcp add gatekeeper -- node ${bin_path}
+Expect a row for the server with a connected status.
 
-Then restart the agent and confirm it lists the pre_action_check tool.
+Prefer not to install globally? Uninstall it and let the agent fetch the package
+on first start instead:
 
-Docs: docs/architecture.md for design, docs/phases.md for the roadmap.
+  npm uninstall -g --prefix ${PREFIX} ${PACKAGE_NAME}
+  opencode mcp add gatekeeper -- npx -y ${PACKAGE_NAME}
+
+The npx route downloads on first use, so the very first start can be slow enough
+to trip your agent's MCP start-up timeout. A global install avoids that.
+
+Full per-agent guides, with scopes and troubleshooting:
+  ${REPO_URL}/tree/main/docs/agents
+
+To uninstall:
+  npm uninstall -g --prefix ${PREFIX} ${PACKAGE_NAME}
 EOF
 }
 
 main() {
-  check_node_version
-  build_project
+  parse_args "$@"
+
+  info "GATEKEEPER MCP installer"
+  info ""
+
+  check_os
+  check_node
+
+  if [ "$DRY_RUN" = "true" ]; then
+    info ""
+    info "[dry-run] no changes will be made"
+  fi
+
+  install_package
+  print_bin_hint
   print_next_steps
 }
 

@@ -1,0 +1,152 @@
+# Publishing GATEKEEPER MCP to npm.
+#
+# BEFORE THIS WILL WORK, the repository owner must:
+#   1. Create an npm access token (Automated publisher token).
+#   2. Add it as a repository secret named NPM_TOKEN:
+#      Settings -> Secrets and variables -> Actions -> New repository secret
+#   3. Make sure the npm account named in package.json (author: blxnkl1) is
+#      allowed to publish that package.
+#
+# `--provenance` requires `permissions: id-token: write` below. It links the
+# published tarball to this workflow run, so consumers can verify the package was
+# built from this repository. Note that provenance is only visible on the npm
+# website after the package has public builds associated with it.
+#
+# TODO: migrate to npm trusted publishing (OIDC), which removes the long-lived
+# NPM_TOKEN entirely. It is the better long-run model because there is no secret
+# to leak or rotate. See the migration note in docs/agents/ before doing it: the
+# package name and the publishing account must match what npm expects, and a
+# mismatch fails the publish step in a way that is easy to misread.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the tag matches the package version
+        run: |
+          # Without this, tagging v1.0.0 against a package.json that still says
+          # 0.0.1 fails at `npm publish` with a duplicate-version error that
+          # reads like a registry problem rather than a tagging mistake.
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches package.json ${pkg}"
+
+  publish:
+    name: publish
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Re-check the tag matches the package version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}"
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify the tarball contents
+        run: |
+          # Guards against shipping a package that is missing the entrypoint or
+          # has grown a file it should not carry.
+          node -e "
+            const { execSync } = require('node:child_process')
+            const out = execSync('npm pack --dry-run --json', { encoding: 'utf8' })
+            const files = JSON.parse(out)[0].files.map((f) => f.path)
+            const allowed = new Set(['dist', 'package.json', 'README.md', 'LICENSE', 'SKILL.md', 'CHANGELOG.md'])
+            const extra = [...new Set(files.map((f) => f.split('/')[0]))].filter((f) => !allowed.has(f))
+            if (extra.length > 0) {
+              console.error('unexpected files in tarball: ' + extra.join(', '))
+              process.exit(1)
+            }
+            if (!files.includes('dist/index.js')) {
+              console.error('tarball is missing dist/index.js')
+              process.exit(1)
+            }
+            console.log('tarball contents are within the allowlist and include the entrypoint')
+          "
+
+      - name: Install the tarball and check the entrypoint starts
+        run: |
+          # Proves the published artifact actually runs, rather than only that it
+          # packs. A missing runtime dependency only shows up here.
+          npm pack
+          mkdir -p /tmp/gk-release-check
+          cd /tmp/gk-release-check
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/gatekeeper-mcp-*.tgz
+          test -x node_modules/.bin/gatekeeper-mcp
+          # It must start and wait on stdin, emitting only a stderr log line.
+          timeout 5 node_modules/.bin/gatekeeper-mcp </dev/null 2>stderr.log
+          test -s stderr.log
+          test ! -s /dev/stdin < /dev/null || true
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published"
+            echo
+            echo "- package: \`$(node -p "require('./package.json').name")\`"
+            echo "- version: \`$(node -p "require('./package.json').version")\`"
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- npm: https://www.npmjs.com/package/$(node -p "require('./package.json').name")"
+          } >> "$GITHUB_STEP_SUMMARY"
