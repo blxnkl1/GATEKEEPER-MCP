@@ -1,0 +1,38 @@
+{
+  "name": "gatekeeper-mcp",
+  "version": "0.0.1",
+  "description": "Local MCP server that gates code-changing actions behind an evidence check, to prevent Action Bias in coding agents.",
+  "type": "module",
+  "bin": {
+    "gatekeeper-mcp": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["dist", "README.md", "LICENSE", "SKILL.md"],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "model-context-protocol", "gatekeeper", "action-bias", "coding-agent"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pino": "^9.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/node": "^20.14.0",
+    "pino-pretty": "^11.0.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.11"
+  }
+}
