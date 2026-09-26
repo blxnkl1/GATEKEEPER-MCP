@@ -12,6 +12,8 @@
 import type { exec, spawn } from 'node:child_process'
 import type { z } from 'zod'
 
+import type { Config } from '../config/loader.js'
+import type { ServerContext } from '../context.js'
 import type {
   preActionCheckInputSchema,
   preActionCheckOutputSchema,
@@ -86,4 +88,20 @@ export interface Deps {
 export interface ServerOptions {
   /** Overrides the server version reported during MCP initialization. */
   version?: string
+  /** Pre-resolved configuration, bypassing the filesystem. */
+  config?: Config
+  /** Pre-built server context, bypassing nonce store and limiter construction. */
+  context?: ServerContext
+  /** Clock injection point, forwarded to the context. */
+  now?: () => number
+  /**
+   * Repository root override, which is also the path sandbox for reproductions.
+   *
+   * A test seam. The root decides both which directory git is consulted in and
+   * which paths a reproduction may use as its working directory, so a test that
+   * asserts on tree state has to be able to point it somewhere known.
+   */
+  cwd?: string
+  /** Engine dependency overrides, for tests that need to script execution. */
+  deps?: Partial<Deps>
 }
