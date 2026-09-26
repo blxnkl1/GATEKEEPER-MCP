@@ -88,6 +88,32 @@ while still appearing in the config.
 - What is the removal subcommand?
 - Can Codex enforce a tool call before a file edit?
 
+### What was tried, and when
+
+Recorded so this page is not mistaken for an oversight, and so nobody repeats the
+work:
+
+- **Phase 3:** `command -v codex` returned nothing, so nothing could be observed.
+  The page was written from convention and every snippet was labelled
+  `UNVERIFIED` in the example file too.
+- **Phase 4:** `command -v codex` was retried in case Codex had been installed
+  since. It was still absent, so no `--help` output and no config read were
+  possible. The `UNVERIFIED` marker was deliberately left in place rather than
+  upgraded on the strength of the other three agents working.
+
+To close this out, install Codex, then paste the output of:
+
+```bash
+codex --version
+codex --help
+codex mcp --help
+```
+
+and, if it has one, its MCP listing command with a server registered. The
+placeholder
+[config.toml](../../examples/agents/codex/config.toml) will most likely need at
+least the table name corrected.
+
 ## Status
 
 **UNVERIFIED.** Codex is not installed here. All five questions above need

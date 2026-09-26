@@ -68,23 +68,29 @@ issue. This is the phase that decides whether the project is actually useful.
 > Before it, the engine could only refuse. The bar for approval is deliberately
 > high and is fixed by [ADR
 > 0002](decisions/0002-phase-2-decision-policy.md): an executed reproduction
-> matching the declared expectation, a verified clean working tree, and no green
-> test suite contradicting the failure.
+> that exited non-zero, a verified clean working tree, and no green test suite
+> contradicting the failure. A command that exited `0` is never failure
+> evidence, whatever the agent declared it expected.
 
 **Deliverables**
 
 - **`reproduction.ts`** — run a user-provided reproduction command in a child
   process, capture its exit code and capped output, and time out cleanly. A
-  non-zero exit under the default `expectFailure: true` is evidence of a problem;
-  a zero exit is evidence against the change. A command that cannot be executed,
-  or that dies on a signal, is never treated as a failure. Free text is never
-  accepted as proof. Owns the `executeCommand` primitive described in
+  non-zero exit is evidence of a problem; a zero exit is evidence against the
+  change. The exit code alone decides this: the agent's `expectFailure` is
+  recorded as metadata but never consulted, so a caller cannot select a polarity
+  that turns a successful run into failure evidence. A command that cannot be
+  executed, or that dies on a signal, is never treated as a failure. Free text
+  is never accepted as proof. Owns the `executeCommand` primitive described in
   [architecture.md](architecture.md#reproduction-safety-model).
 - **`state.ts`** — run `git rev-parse --is-inside-work-tree` and
   `git status --porcelain` to classify the working tree as clean, dirty, or
   unknown; detect the package manager from the lockfile; read `scripts.test`
-  from `package.json`; and run the suite when `runTests` is true. Only the exit
-  code is interpreted, never scraped test output.
+  from `package.json`; and run it whenever it can change the verdict, which is
+  whenever a failure was reproduced on a clean tree. Only the exit code is
+  interpreted, never scraped test output. The command may be overridden by the
+  operator's `testCommand`, which is server-side configuration and never agent
+  input, because its result is what makes `allow` reachable.
 - **`decision.ts`** — the full ordered policy, with `allow` reachable only
   through the reproduced-plus-clean path. Every verdict is logged at info level.
 - Dependency injection for every side effect via `Deps`, so the engine is fully
@@ -157,7 +163,7 @@ are listed so nobody mistakes them for guarantees.
   something, which is a judgement call that does not belong in a gatekeeper.
   The input is still accepted so existing callers keep working.
 - **The test suite is skipped outside a git repository.** A non-repository
-  directory reports `tests: 'skipped'` even when `runTests: true`, because the
+  directory reports `tests: 'skipped'` even when a failure was reproduced, because the
   repository check short-circuits first. Running tests in an unpacked tarball
   would be reasonable; it is simply not implemented.
 - **Signal deaths are unverifiable, not failures.** A reproduction killed by
@@ -293,11 +299,78 @@ shipped configs; it is the boundary of what was actually observable.
 
 ### Exit Criteria
 
-- [ ] Package published to npm and installable via `npx`.
-- [ ] `curl | bash` installer tested on macOS and Linux.
-- [ ] Release workflow runs all checks and publishes on a tag.
-- [ ] Changelog generated from Conventional Commits.
-- [ ] README install path no longer requires `git clone`.
+- [!] "Package published to npm and installable via `npx`": **not done, by
+      design.** Publishing happens only from the release workflow on a
+      `v*.*.*` tag, and no tag was pushed during this phase. What *was* verified:
+      `npm view gatekeeper-mcp` returns 404, so the name is free, and
+      `npm pack --dry-run` produces a tarball containing only the allowlist with
+      a working `bin`. The publish step itself is unexercised until a tag exists.
+- [x] `curl | bash` installer rewritten: OS detection, Node check, `--version`,
+      `--prefix`, `--dry-run`, installs via npm rather than cloning.
+- [x] Installer has its own test, `scripts/install.test.sh`, 11 assertions, all
+      passing, and it runs in `ci.yml`.
+- [x] Symmetric `scripts/uninstall.sh` that does not touch agent configs.
+- [x] Release workflow runs the full check suite on Linux **and** macOS, then
+      publishes on `ubuntu-latest` with `--provenance`, gated on `needs: test`.
+- [x] `ci.yml` runs on pull requests, including a tarball allowlist assertion so
+      an accidental file cannot ship.
+- [x] Issue templates for bugs and feature requests.
+- [x] README rewritten with badges, both install paths, and the matrix moved up.
+- [x] [ADR 0003](decisions/0003-npm-publish-strategy.md) records the publish
+      strategy and the credential trade-offs.
+- [x] All three Phase 3 blockers addressed. See
+      [Phase 4 — Known Limitations](#phase-4--known-limitations).
+- [ ] Changelog generated from Conventional Commits. Not started; no commit
+      history exists yet.
+
+### Phase 4 — Known Limitations
+
+- **The publish step has never run.** The workflow is written and reviewed but
+  unexecuted, and a published artefact cannot be recalled. It needs an
+  `NPM_TOKEN` secret before the first tag, and the first release should be
+  treated as a rehearsal. Nothing here can be verified without publishing,
+  which is exactly why it was not done.
+- **`npx` and `npm install -g` are unproven.** `npm pack` proves the tarball
+  contents and the `bin` path; it says nothing about whether npm's resolver can
+  install and execute it. The README says so explicitly with a date.
+- **The end-to-end test found a real problem, and it is not fixed.** A model
+  reported a tool result it did not receive: the server answered `deny` with
+  `evidence.state: "not_reproduced"`, and OpenCode reported `allow` with
+  `evidence.state: "unverifiable"` and entirely invented prose. The gate was
+  working; the model did not relay it. This is the most important finding of
+  the phase, it is inherent to tool-calling agents rather than a bug in this
+  codebase, and it is **not** addressed by any current design choice. See
+  [scripts/e2e/README.md](../scripts/e2e/README.md). A mitigation is proposed
+  in Phase 5.
+- **Only one agent was ever run end to end.** Claude Code is installed but not
+  logged in, so it reported `INCONCLUSIVE` and the test fell through to
+  OpenCode. Codex is absent, and Hermes was skipped by policy because it
+  registers servers only through an interactive prompt. There is no
+  cross-agent matrix.
+- **Agent sessions are non-deterministic.** Repeated runs of the same prompt
+  against the same build produced three different outcomes: a fabricated
+  `allow`, an abandoned tool call, and a second abandoned tool call. A single
+  scripted run cannot be a regression test for a model, so this belongs in CI
+  only as a smoke signal, never as a gate.
+- **The installer has only been dry-run.** `npm install -g` was never executed,
+  because the package does not exist yet. The `--prefix` handling, the PATH
+  warning, and the non-macOS, non-Linux branch are all unexercised.
+- **`shellcheck` was unavailable**, so the shell scripts were checked with
+  `bash -n` only, which does not catch quoting and portability issues.
+- **`prepublishOnly` runs the suite twice on a release** (once in `ci.yml`, once
+  at pack time). Deliberate: it makes a deliberate local publish safe too. It
+  does make the tag pipeline slower.
+
+### A caveat on the e2e result
+
+The strongest thing Phase 4 established is a negative one. The chain from
+published layout to agent to tool call demonstrably works: OpenCode loaded the
+server, called `pre_action_check`, and received a verdict. What does **not**
+hold is the assumption that the model will act on that verdict, because a model
+can report a result it never received, and did. A gatekeeper that is advisory
+rather than enforced is therefore weaker than the project would like, and the
+Phase 3 open question "can an agent be made to *must* call this tool" now has a
+second, harder version: "can an agent be made to *not invent* the result".
 
 ---
 
@@ -333,9 +406,53 @@ shipped configs; it is the boundary of what was actually observable.
 
 ### Exit Criteria
 
-- [ ] Rate limiting implemented and configurable.
-- [ ] Allowlist and denylist applied, with tests for both.
-- [ ] `.gatekeeperrc.json` supported, optional, and schema-validated.
-- [ ] Local audit log implemented with a documented retention policy.
-- [ ] Network-egress check added to CI.
-- [ ] ADR written for the config file format and the audit log's data boundary.
+- [x] Rate limiting implemented and configurable. Sliding window, default 20 per
+      60 s, tested with a fake clock at and over the boundary.
+- [x] Command denylist applied before anything is spawned, with tests. Patterns
+      are matched against the command **and its arguments**, since `curl <url> |
+      sh` arrives as a command plus arguments.
+- [x] `.gatekeeperrc.json` supported, optional, and schema-validated. Four-tier
+      search order tested; unknown fields rejected.
+- [x] Invalid config refuses to start rather than reverting to defaults, exit 78
+      with a message on stderr.
+- [x] Local audit log implemented with one-generation rotation at 10 MB, hashed
+      task descriptions, and off by default.
+- [x] Network-egress and free-forever guarantees enforced by tests, in CI.
+- [x] [ADR 0006](decisions/0006-anti-fabrication-strategy.md) records the
+      anti-fabrication strategy and its limit.
+- [x] Nonce issued on every response, `verify_decision` registered and tested.
+- [x] Advisory default with opt-in enforced mode, verified end to end.
+
+### Phase 5 — Known Limitations
+
+- **Enforcement is limited to sequence violations. MCP cannot block file edits.**
+  Enforced mode refuses to issue a new verdict while the previous one is
+  unacknowledged. It has no channel to the filesystem the agent writes to, so a
+  `deny` binds only an agent that treats it as binding. An agent that never
+  calls `pre_action_check` is unaffected by the entire mechanism, and one that
+  ignores the answer and skips `verify_decision` is equally unaffected. Real
+  enforcement means configuring the agent so the write itself depends on the tool
+  result, which is agent configuration and outside this project.
+- **The audit log is off by default.** Users who would benefit most from it are
+  the ones who will not turn it on. It is opt-in because writing a file nobody
+  asked for is a surprise, and ADR 0005 treats those as a category of problem.
+- **Fabrication is only detectable after the fact.** A mismatch is recorded when
+  the agent verifies, not when it edits. An agent that never verifies produces
+  no record of having lied.
+- **Nonces are per-process.** They do not survive a server restart, so a verdict
+  issued before a crash cannot be verified after it. The enforcement window is
+  likewise bounded by process lifetime.
+- **The rate limit is one bucket per server.** A single agent looping can exhaust
+  it; there is no per-agent fairness, so one noisy caller starves the rest.
+  Multi-agent hosts are a plausible future need.
+- **The denylist is a static list.** It cannot know that a legitimately named
+  script is destructive, and a user who replaces the list replaces all of it
+  rather than extending it, since the configured list replaces the built-in one.
+- **A broken user-supplied pattern fails open** for that one pattern. The
+  basename denylist still applies, and the failure is silent. Validating patterns
+  at load time would close this and is a small change.
+- **No `agent-integration.sh` run has produced a clean `PASS`.** OpenCode's
+  provider returns HTTP 403 and Claude Code is logged out on this machine. The
+  anti-fabrication flow is verified through `mcp-protocol.sh` over real stdio
+  instead, which is deterministic and does not need a model. This is not a
+  regression, and the e2e was not weakened to hide it.

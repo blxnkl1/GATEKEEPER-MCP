@@ -17,30 +17,44 @@ Copy-paste configs live in [`examples/agents/`](../../examples/agents/).
 | Agent | Status | Config path | Guide |
 | --- | --- | --- | --- |
 | OpenCode v1 | UNVERIFIED | `opencode.json` | [docs/agents/opencode.md](./opencode.md) |
-| OpenCode v2 | VERIFIED | `opencode.json` | [docs/agents/opencode.md](./opencode.md) |
+| OpenCode v2.0.18 | VERIFIED | `opencode.json` | [docs/agents/opencode.md](./opencode.md) |
 | Codex | UNVERIFIED | `~/.codex/config.toml` (unconfirmed) | [docs/agents/codex.md](./codex.md) |
-| Claude Code | VERIFIED | `~/.claude.json` / `.mcp.json` | [docs/agents/claude-code.md](./claude-code.md) |
-| Hermes Agent | PARTIALLY VERIFIED | `~/.hermes/config.yaml` | [docs/agents/hermes.md](./hermes.md) |
+| Claude Code 2.1.195 | VERIFIED (config) | `~/.claude.json` / `.mcp.json` | [docs/agents/claude-code.md](./claude-code.md) |
+| Hermes Agent v0.17.0 | PARTIALLY VERIFIED | `~/.hermes/config.yaml` | [docs/agents/hermes.md](./hermes.md) |
+| Any MCP-compatible agent | COMPATIBLE BY DESIGN | agent-specific | this page |
 
 Configs that are not yet fully verified are marked accordingly in each guide.
 
-### What the statuses mean
+### What each status means here
 
-- **VERIFIED** — the config was written by the agent's own CLI or read back by
-  it, and the server was observed to connect. Versions are named in each guide.
-- **PARTIALLY VERIFIED** — the connection and tool discovery were observed, but
-  some part of the config format or the verification path could not be confirmed.
-- **UNVERIFIED** — the agent was not available on the machine where these docs
-  were written, so nothing was observed. The example is a best-effort starting
-  point and is labelled as such in the file itself.
+- **OpenCode v2.0.18 — VERIFIED.** Registered with the agent's own CLI, and
+  `opencode mcp list` reported `gatekeeper connected`. The tool has been observed
+  being invoked. Scope of that claim: the model under the *default* agent profile
+  does not always surface the tool to itself, which is a property of the profile
+  rather than of the server. See [scripts/e2e/README.md](../../scripts/e2e/README.md).
+- **Claude Code 2.1.195 — VERIFIED (config).** The config format is confirmed:
+  `claude mcp add` writes the documented keys, `claude mcp get` reads them back,
+  and `claude mcp list` reported `Connected` for a correctly configured server. A
+  tool call has **not** been observed end to end on this machine, because the
+  installed CLI is not authenticated. Authentication is separate from config
+  correctness and varies per user.
+- **Hermes Agent v0.17.0 — PARTIALLY VERIFIED.** The YAML format and the
+  `mcp_servers` keys are confirmed, and a connection handshake was observed
+  listing `pre_action_check` by name. Non-interactive installation is not
+  possible, so it cannot be driven from a script.
+- **OpenCode v1 and Codex — UNVERIFIED.** Not installed on the test machine.
+  Nothing about their config formats was observed.
+- **Any MCP-compatible agent — COMPATIBLE BY DESIGN.** GATEKEEPER implements the
+  standard MCP stdio transport. Any agent that supports MCP stdio can use it;
+  only the config syntax differs. Nothing vendor-specific appears in the server.
 
 ### Versions observed
 
 | Agent | Version | How it was checked |
 | --- | --- | --- |
-| OpenCode | v2.0.18 | `opencode --version`, `opencode mcp add`, `opencode mcp list` |
-| Claude Code | 2.1.195 | `claude --version`, `claude mcp add -s project`, `claude mcp get` |
-| Hermes Agent | v0.17.0 | `hermes --version`, `hermes config path`, `hermes mcp add`, `hermes mcp list` |
+| OpenCode | v2.0.18 | `opencode mcp add`, `opencode mcp list`, `opencode run` |
+| Claude Code | 2.1.195 | `claude mcp add -s project`, `claude mcp get`, `claude mcp list` |
+| Hermes Agent | v0.17.0 | `hermes config path`, `hermes mcp add`, `hermes mcp list` |
 | Codex | not installed | nothing was checked |
 | OpenCode v1 | not installed | nothing was checked |
 
@@ -51,11 +65,12 @@ actually expects.
 
 ## Before you start
 
-GATEKEEPER MCP is not on npm yet. Until Phase 4, every snippet points at a
-local build:
+These snippets point at a local build, which is what you want when working on the
+project itself. For day-to-day use, install from npm and use
+`npx -y gatekeeper-mcp` instead:
 
 ```bash
-git clone https://github.com/<YOUR NAME>/gatekeeper-mcp.git
+git clone https://github.com/blxnkl1/GATEKEEPER-MCP.git
 cd gatekeeper-mcp
 npm ci
 npm run build

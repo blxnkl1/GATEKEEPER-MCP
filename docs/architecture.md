@@ -168,7 +168,7 @@ produced, and the only path to it is rule 5c. See
 
 1. The agent decides it is about to modify code and calls `pre_action_check`
    with `taskDescription`, `proposedChange`, and optionally `affectedFiles`,
-   `evidenceOfProblem`, `reproduction`, and `runTests`.
+   `evidenceOfProblem`, and `reproduction`.
 2. The SDK receives the JSON-RPC `tools/call` request and validates `arguments`
    against the tool's input schema. A malformed call is rejected here, as a
    protocol-level validation error.
@@ -184,9 +184,12 @@ produced, and the only path to it is rule 5c. See
    stage 2 is skipped entirely. No process is spawned and git is never consulted.
 6. **Stage 2, state.** `inspectState` runs `git rev-parse --is-inside-work-tree`,
    then `git status --porcelain`, and derives `workingTree` as `clean`, `dirty`,
-   or `unknown`. When `runTests` is true it also detects the package manager
-   from the lockfile, reads `scripts.test` from `package.json`, and runs the
-   suite, deriving `tests` as `pass`, `fail`, `skipped`, or `unknown`.
+   or `unknown`. When the tree is clean and the evidence is `reproduced`, it also
+   resolves the project's verification command — `testCommand` from the operator's
+   configuration if set, otherwise the package manager detected from the lockfile
+   plus `scripts.test` — and runs it, deriving `tests` as `pass`, `fail`, or
+   `unknown`. It is not gated on any agent-supplied flag; see
+   [ADR 0007](./decisions/0007-verification-command-decides-allow.md).
 7. **Stage 3, decision.** `decide` applies the ordered policy. The first
    matching rule wins, and the verdict is logged at info level on the way out.
 8. The handler validates the result against `preActionCheckOutputSchema` and
@@ -203,6 +206,8 @@ evidence = runReproduction(input, deps)
 if evidence is not_reproduced            -> state = skipped, deny
 if evidence is unverifiable, no text     -> state = skipped, deny
 else                                     -> state = inspectState(input, deps)
+                                          (verification runs when the evidence
+                                           is reproduced and the tree is clean)
 
 decide(input, evidence, state):
   1. not_reproduced                          -> deny
@@ -210,19 +215,28 @@ decide(input, evidence, state):
   3. unverifiable && evidenceOfProblem       -> request_info
   4. timeout                                 -> request_info
   5. reproduced:
-       5a.  workingTree = dirty              -> request_info
-       5a'. workingTree = unknown            -> request_info
-       5b.  runTests && tests = pass         -> request_info
-       5c.  otherwise                        -> allow
+       5a.   workingTree = dirty              -> request_info
+       5a'.  workingTree = unknown            -> request_info
+       5a''  exitCode is 0 or absent          -> deny
+       5b.   tests = pass                     -> request_info
+       5b'.  tests is unknown or skipped      -> deny
+       5c.   tests = fail                     -> allow
   6. otherwise                               -> request_info
 ```
 
-`allow` is reachable only through rule 5c, which requires all three of: an
-executed reproduction matching the declared expectation, a verified clean
-working tree, and no green test suite contradicting the failure. Rule 5a' is a
-deliberate narrowing: `unknown` is treated as not-clean, so a missing git, or a
-directory that is not a repository, cannot produce an approval. See
-[ADR 0002](./decisions/0002-phase-2-decision-policy.md).
+`allow` is reachable only through rule 5c, which requires all four of: an
+executed reproduction that exited non-zero, a verified clean working tree, a
+verification command the server actually ran, and that command failing too. The
+first two are the agent's claim. The last two are the part the agent does not
+control, and they are what stop `{"command":"false"}` from buying an approval on
+a healthy repository.
+
+Rule 5a'' denies a zero or absent exit code, so a successful command is never
+failure evidence whatever the agent declares. Rules 5a' and 5b' both resolve
+uncertainty by refusing: a tree or a verification surface that could not be
+established is not a clean tree and not a failing suite. See
+[ADR 0002](./decisions/0002-phase-2-decision-policy.md) and
+[ADR 0007](./decisions/0007-verification-command-decides-allow.md).
 
 ## Reproduction Safety Model
 
@@ -249,9 +263,29 @@ bare executable is often an absolute path.
 
 **Confined working directory.** A supplied `cwd` is resolved against the
 repository root and rejected if it lands outside it, so a reproduction cannot be
-pointed at `/etc`, `$HOME`, or a sibling checkout. The check is lexical: a
-symlink inside the repository pointing outside it is **not** caught. This is a
-known limitation, recorded in [phases.md](./phases.md), not an oversight.
+pointed at `/etc`, `$HOME`, or a sibling checkout. Both sides are resolved through
+`realpath` first, so a symlink inside the repository that points outside it is
+rejected rather than followed. A purely lexical comparison passed such a symlink,
+and the child then really did run over there; that is fixed, and
+`tests/security/allow-invariant.test.ts` pins it.
+
+**Arguments are not confined, and this is not a sandbox.** Only `cwd` is
+constrained. `args` are passed to the child verbatim, so a reproduction may read
+any file the user can read — `{"command":"cat","args":["/etc/passwd"]}` runs, and
+up to 200 characters of its output come back in the `detail` string. This is not
+privilege escalation, because the agent could read those files with its own tools,
+but it does mean "confined to the repository root" describes the working
+directory and nothing more. It must not be read as filesystem containment.
+
+**Interpreters are refused, and the list is not the control that protects the
+invariant.** `sh`, `bash`, `zsh`, `env`, `python3`, `perl`, `ruby`, `php`,
+`osascript`, `pwsh` and the network fetchers are all on the default denylist,
+because `bash -c "…"` is a shell by another name and allowing it while refusing
+`curl … | sh` would make the pattern denylist decorative. But `node` stays
+allowed, because it is ordinary project tooling, and `node -e "…"` is a complete
+interpreter in a single argument. A denylist cannot close that. What protects the
+invariant is rule 5c: an interpreter that exits non-zero still cannot reach
+`allow` unless the project's own verification command also fails.
 
 **Closed stdin.** `stdio` is `['ignore', 'pipe', 'pipe']`. A reproduction that
 reads stdin sees EOF instead of consuming the MCP host's JSON-RPC request stream,
@@ -271,11 +305,44 @@ the child to actually die: a gatekeeper that blocks an agent session on an
 unresponsive child is worse than one that reports a timeout. The pending timer is
 created with an `AbortSignal` and cancelled as soon as the command finishes,
 because an abandoned five-minute timer would otherwise hold the event loop open.
+The verification command has its own ceiling, `testTimeoutMs`, defaulting to
+120000.
 
-**What this is not.** These controls prevent accidental damage and trivially
-malformed input. They are not a security sandbox: there is no user
-namespace, no seccomp, no resource limit beyond output length, and no filesystem
-chroot. The project should not be described as though it sandboxes execution.
+**Descendants are not reaped.** `SIGKILL` is delivered to the direct child only.
+A reproduction that spawns a background daemon can leave it running after the
+verdict is returned. This is a known limitation of killing a process rather than
+a process group, and it is not fixed in v1.0.0.
+
+## Execution Boundary
+
+Stated precisely, because the difference between a gate and a sandbox is the
+difference between a useful tool and a false claim.
+
+**GATEKEEPER can constrain:**
+
+- the *shape* of the command it spawns: one primitive, `shell: false`, a bare
+  executable plus an argv array, stdin closed, output capped, time bounded;
+- the *working directory*: resolved through `realpath` and required to be the
+  repository root or beneath it;
+- *which commands* are acceptable, via a denylist the operator can extend;
+- *what the verdict may claim*, by requiring server-observed evidence for every
+  term in the `allow` conjunction.
+
+**GATEKEEPER cannot constrain:**
+
+- **What the child process does.** No seccomp, no namespace, no chroot, no
+  resource limits beyond output length. A permitted command can read any file the
+  user can read, write any file the user can write, and open network connections.
+- **Which files the child touches.** `args` are unconstrained; see above.
+- **Network egress by the child.** GATEKEEPER itself opens no socket, but it will
+  happily run a command that does. The accurate claim is: *GATEKEEPER itself
+  performs no network egress; reproduction commands may execute according to the
+  configured execution policy.* Network fetchers are on the default denylist to
+  reduce that, not to eliminate it — `node -e` still reaches the network.
+- **Whether a failure corresponds to the bug the agent described.** See
+  [ADR 0007](./decisions/0007-verification-command-decides-allow.md).
+- **Whether the agent edits a file after a `deny`.** MCP is request/response over
+  stdio; the server has no channel to the filesystem the agent writes through.
 
 ## Transport Decision
 
@@ -338,6 +405,97 @@ Two config details were found by observation rather than documentation, and both
 corrected what this project previously claimed: OpenCode v2 nests the entry at
 `mcp.servers.<name>` rather than `mcp.<name>`, and Hermes Agent uses
 `--command ... --args ...` with a YAML config rather than a `--` style flag.
+
+## Anti-Fabrication
+
+A real agent in Phase 4 reported a `pre_action_check` verdict the server never
+sent: the server said `deny`, the agent said `allow`. The gate worked; the report
+of it did not. This section is the mechanism that makes the report checkable.
+
+```
+Agent ──pre_action_check──▶ Server
+  ◀── decision + nonce ────┘
+  │
+  ├── verify_decision(nonce, decision) ──▶ Server
+  │                                        ├── valid?  ──▶ audit: verify_decision
+  │                                        └── invalid ──▶ audit: fabrication_suspected
+  │
+  └── (optional) make the change
+```
+
+The server issues a `nonce` with every verdict: 16 CSPRNG bytes, base64url, 22
+characters. It is single use, so one real decision cannot be laundered into many
+claims. The agent presents the nonce together with the decision it intends to
+report, and the server compares.
+
+### Where the pieces sit
+
+```
+             ┌──────────────── src/tools/ ────────────────┐
+  agent ────▶│ pre_action_check                           │
+             │   rate limit ─▶ issue nonce ─▶ analyze()   │
+             │ verify_decision                            │
+             └───────┬──────────────┬──────────────┬──────┘
+                     │              │              │
+        ┌────────────▼───┐  ┌───────▼────────┐  ┌──▼──────────────┐
+        │ ratelimit/     │  │ store/         │  │ audit/          │
+        │ sliding-window │  │ nonce-store    │  │ audit-log       │
+        │ (window, max)  │  │ (LRU, 1h... 5m)│  │ (JSONL, 10MB)   │
+        └────────────────┘  └────────────────┘  └─────────────────┘
+                     ▲              ▲
+                     └────── src/config/loader.ts ───┘
+                              (mode, denylist, limits)
+```
+
+- **`src/config/loader.ts`** resolves configuration once at startup and is the only
+  thing that reads the filesystem for settings. A bad file stops the server.
+- **`src/ratelimit/sliding-window.ts`** sits in front of everything, so a runaway
+  loop cannot make the engine spawn processes.
+- **`src/store/nonce-store.ts`** holds issued nonces, bounded and self-sweeping
+  on issue rather than on a timer.
+- **`src/audit/audit-log.ts`** is the ground truth for a dispute. Off by default;
+  `taskDescription` is stored as a truncated SHA-256, never as text.
+
+### The honest limit
+
+Enforced mode refuses to produce a new verdict while a previous one is
+unacknowledged. **It cannot block a file edit.** MCP has no channel to the
+filesystem the agent writes to, so a `deny` is only binding on an agent that
+treats it as binding. See [ADR 0006](./decisions/0006-anti-fabrication-strategy.md).
+
+## Distribution
+
+GATEKEEPER MCP ships as a single npm package. Three install paths exist, and
+they exist because the three use cases are genuinely different rather than as
+variations on a theme.
+
+| Path | Command | Use when |
+| --- | --- | --- |
+| npx, no install | `opencode mcp add gatekeeper -- npx -y gatekeeper-mcp` | Trying it out, or a machine you do not want to modify |
+| Global install | `curl -fsSL .../install.sh \| bash` | Normal use, and anything automated |
+| Clone and build | `git clone ... && npm ci && npm run build` | Working on the project, or a locked-down machine |
+
+**The package is the build output, not the source.** `files` allows `dist`,
+`README.md`, `LICENSE`, and `SKILL.md` only, so a consumer gets compiled
+JavaScript and the agent-facing skill, and nothing that could be mistaken for a
+supported configuration surface. `npm pack --dry-run` is asserted against that
+allowlist in CI, so a file added to the repository by accident cannot ship.
+
+**Why npx is not the only story.** The first start under npx downloads the
+package, which can be slow enough to trip an agent's MCP start-up timeout. A
+global install pays that cost once, at install time. That is the whole reason the
+installer exists rather than a README line.
+
+**Why cloning is still documented.** The package is not published yet, so the
+clone path is the only one that works today. It is also the correct path for
+anyone changing the server, and the one the Phase 3 agent guides use, because
+those snippets need an absolute path to a build that exists.
+
+**Publishing** is described in
+[ADR 0003](./decisions/0003-npm-publish-strategy.md). In short: GitHub Actions on
+a `v*.*.*` tag, the full check suite on Linux and macOS, then `npm publish
+--provenance` on Linux. Manual publishing is prohibited by policy, so the
+published artefact is always a clean checkout of a tagged commit.
 
 ## Future Work
 

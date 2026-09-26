@@ -56,9 +56,8 @@ We chose the third.
 
 `allow` is reachable through exactly one path. All three conditions must hold:
 
-1. The reproduction was **executed** and produced the outcome the agent
-   predicted: a non-zero exit under the default `expectFailure: true`, or a zero
-   exit when `expectFailure: false` was declared.
+1. The reproduction was **executed** and exited **non-zero**. The exit code is
+   the sole criterion.
 2. The git working tree is **clean**, verified via `git status --porcelain`.
 3. No contradiction: either tests were not requested, or they were requested and
    did not pass.
@@ -67,6 +66,52 @@ Every other combination returns `deny` or `request_info`. Free-text
 `evidenceOfProblem` is explicitly **not** accepted as a substitute for an
 executed command, because a paragraph of prose is exactly as easy to fabricate as
 a change is to justify, and it can never be checked.
+
+### Amendment, 2026-09-27: condition 1 corrected
+
+This decision originally defined condition 1 as "the reproduction was executed
+and produced the outcome the agent predicted: a non-zero exit under the default
+`expectFailure: true`, or a zero exit when `expectFailure: false` was declared."
+
+That was wrong, and it defeated the point of the third option above. Because the
+agent supplied both the command *and* the polarity, a single caller-controlled
+boolean was enough to manufacture the evidence the gate existed to require:
+`{"command": "true", "expectFailure": false}` exits zero, was classified
+`reproduced`, and reached `allow` on a clean tree. The conjunction of
+"independent facts" was not independent, because one of the facts was the
+caller's own assertion.
+
+Condition 1 is now stated in terms of the observed exit code alone.
+`reproduction.expectFailure` survives in the public input as descriptive
+metadata — it records what the agent expected and is echoed in the detail
+string — but it is never consulted when classifying the outcome. A successful
+command is never failure evidence.
+
+The correction is enforced in two independent places. `runReproduction` derives
+`reproduced` from `exitCode !== 0` and nothing else, and `decide` refuses
+`allow` at the point of granting it unless the evidence carries an observed
+non-zero exit code (rule 5a''), so a future change upstream cannot quietly
+reopen the hole.
+
+### Second amendment, 2026-09-27: conditions 2 and 3 strengthened
+
+A later audit showed the first amendment was necessary but not sufficient. With
+condition 1 as corrected, `{"command":"false"}` on a clean tree still reached
+`allow`, because the agent chose the command and condition 3 only applied when
+the agent asked for it. See [ADR 0007](./0007-verification-command-decides-allow.md).
+
+Conditions 1 to 3 now read:
+
+1. The reproduction was **executed** and exited **non-zero**. The exit code is
+   the sole criterion.
+2. The git working tree is **clean**, verified via `git status --porcelain`.
+3. The project's own verification command was **run by the server and also
+   failed**. A green verification surface blocks (rule 5b); an unobservable one —
+   no test script, no runner, a timeout, a signal — denies (rule 5b'), because
+   unknown is not evidence.
+
+`reproduction.runTests` is removed, because its only effect was to let the agent
+decline condition 3.
 
 Two further choices follow from the same reasoning:
 

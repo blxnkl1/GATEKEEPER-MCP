@@ -25,7 +25,7 @@ If `decision: "request_info"`, the agent MUST ask the user for the missing evide
 
 If `decision: "allow"`, the agent may proceed.
 
-## Phase 2: executable evidence
+## Executable evidence
 
 Free-text `evidenceOfProblem` is **never** sufficient. A paragraph describing a
 stack trace is as easy to fabricate as a change is to justify, and it cannot be
@@ -40,7 +40,7 @@ reproduction: {
   args?: string[];         // everything else goes here
   cwd?: string;            // must be inside the repository root
   timeoutMs?: number;      // default 30000, range 1000-300000
-  expectFailure?: boolean; // default true: non-zero exit means reproduced
+  expectFailure?: boolean; // descriptive only; never affects the verdict
 }
 ```
 
@@ -64,19 +64,41 @@ Rules the agent MUST follow:
    reason looks exactly like a genuine bug.
 3. The command must be **reproducible right now** and must pass once the bug is
    fixed. If it fails forever, or passes now, it is not evidence.
-4. `expectFailure: true` (the default) means "this should fail today". Set it to
-   `false` only for a check that is expected to succeed today and that the change
-   would break.
-5. A `deny` with `evidence.state: "not_reproduced"` means the command **passed**,
-   so the code is likely already correct. Do not retry with a different command
-   just to get an `allow`; report that the task appears already satisfied.
+4. `expectFailure` is **descriptive only**. It records whether you expected the
+   command to fail today, and it cannot change the verdict. Only a non-zero exit
+   is ever treated as failure evidence: a command that exits `0` is a `deny`
+   whatever you pass here. Do not try to obtain an `allow` by flipping it.
+5. A `deny` with `evidence.state: "not_reproduced"` means the command **exited
+   zero**, so the code is likely already correct. Do not retry with a different
+   command just to get an `allow`; report that the task appears already
+   satisfied.
 6. `request_info` with a `dirty` working tree means commit or stash first, then
    re-run. Uncommitted changes make a failure untrustworthy.
 
-An `allow` is only issued when the failure was reproduced, the working tree is
-clean, and no green test suite contradicts the failure. Committing unrelated
-work before calling the tool is what makes the difference between `allow` and
-`request_info`.
+An `allow` is only issued when **all four** of these hold:
+
+1. the reproduction command ran and exited non-zero,
+2. the git working tree is clean,
+3. the server ran the project's own verification command,
+4. that verification command also failed.
+
+The first two are your claim. The last two are the part you do not control, and
+they are why a command you chose cannot buy an approval on its own. In
+particular `{"command":"false"}` will not be approved on a healthy project: the
+server runs the project's tests, they pass, and the change is held back.
+
+Two consequences worth knowing before you plan a fix:
+
+- **A green suite means `request_info`, not `allow`.** If the project already
+  passes its tests, the reported bug is not confirmed by them. The next step is to
+  add a failing test that captures the bug, then re-run the check. Do not try to
+  talk your way past this; the server has already looked.
+- **A project with no verification command can never be approved.** The server
+  reports `tests: "unknown"` and denies. If that is your project, say so and ask
+  the user to configure `testCommand`.
+
+Committing unrelated work before calling the tool is what makes the difference
+between `allow` and `request_info`.
 
 ## Anti-patterns this skill prevents
 1. Refactoring code that is already correct.
@@ -84,6 +106,14 @@ work before calling the tool is what makes the difference between `allow` and
 3. Renaming, reformatting, or restructuring as a side effect.
 4. Fixing bugs that cannot be reproduced.
 5. Adding abstractions "for the future".
+
+## Reporting the server's decision
+
+Every `pre_action_check` response contains a `nonce`. If you (the agent) report
+a decision to the user, you MUST first call `verify_decision` with that nonce
+and the decision you intend to report. If verification fails, do not report a
+decision; report the verification failure instead. Fabricating a decision is
+worse than reporting no decision.
 
 ## Workflow the agent must follow
 1. Read the task.
@@ -104,20 +134,61 @@ work before calling the tool is what makes the difference between `allow` and
 - Never modify files outside the `src/`, `tests/`, `docs/`, `scripts/` folders unless explicitly asked.
 
 ## How to invoke (for agents)
-Register this MCP server in the agent's config. Examples:
-- **OpenCode**: add to `opencode.json` → `mcp.servers.gatekeeper.type = "local"`, `command = ["node", "<REPO>/dist/index.js"]`.
-- **Codex**: `~/.codex/config.toml` → `[mcp_servers.gatekeeper]`, `command = "node"`, `args = ["<REPO>/dist/index.js"]`.
-- **Claude Code**: `claude mcp add gatekeeper -- node <REPO>/dist/index.js`.
-- **Hermes Agent**: `hermes mcp add gatekeeper --command node --args <REPO>/dist/index.js`.
+
+**Primary: the published package.** Register the npx form and let the agent fetch
+it:
+
+- **OpenCode**: `opencode mcp add gatekeeper -- npx -y gatekeeper-mcp`
+- **Codex**: UNVERIFIED. See `docs/agents/codex.md`.
+- **Claude Code**: `claude mcp add gatekeeper -- npx -y gatekeeper-mcp`
+- **Hermes Agent**: `hermes mcp add gatekeeper --command npx --args -y gatekeeper-mcp`
+  (Hermes connects first, lists the tools it finds, then asks which to enable.
+  Answer `Y` to enable `pre_action_check`.)
+
+**Development path: a local build.** When working on the project itself:
+
+```bash
+git clone https://github.com/blxnkl1/GATEKEEPER-MCP.git
+cd GATEKEEPER-MCP
+npm ci && npm run build
+```
+
+- **OpenCode**: `opencode mcp add gatekeeper -- node <REPO>/dist/index.js`
+- **Codex**: `[mcp_servers.gatekeeper]`, `command = "node"`, `args = ["<REPO>/dist/index.js"]`
+- **Claude Code**: `claude mcp add gatekeeper -- node <REPO>/dist/index.js`
+- **Hermes Agent**: `hermes mcp add gatekeeper --command node --args <REPO>/dist/index.js`
+
+The path must be absolute: MCP servers start with an unspecified working
+directory, so a relative path will not resolve.
 
 ### Where to find per-agent setup
 - `docs/agents/` — full guides, one per agent.
 - `examples/agents/` — copy-paste configs.
 - `scripts/verify-agent.sh <agent-cli>` — checks that `pre_action_check` is loaded.
 
+### Never report a verdict you did not receive
+
+`scripts/e2e/` has observed an agent report a `pre_action_check` result the server
+never sent, including a fabricated `allow` where the real answer was `deny`. If a
+tool call returns nothing, or the result looks inconsistent with the arguments
+you passed, say exactly that and stop. Do not reconstruct, guess, or paraphrase
+a verdict. A wrong `allow` is the one outcome this tool exists to prevent.
+
 ## Guardrails for the agent working ON this project
-- Do NOT implement Phase 2+ features while in Phase 1. Stubs stay stubs until their phase.
-- Do NOT introduce networking, telemetry, or remote calls. This project is LOCAL-ONLY.
+- Do NOT weaken the ALLOW invariant. `allow` requires a non-zero exit, a clean
+  tree, and a server-observed failing verification command. If a change seems to
+  need one of those relaxed, stop and say so.
+- Do NOT reintroduce `runTests`, or any other agent-controlled flag that decides
+  whether the gate cross-checks a claim. That flag is why `{"command":"false"}`
+  used to be approved.
+- Do NOT add a process-execution API. `executeCommand` is the only one; a second
+  path bypasses its shell, timeout, and output guards.
+- Do NOT introduce networking, telemetry, or remote calls in the server. This
+  project is LOCAL-ONLY. (Reproduction commands are a separate matter: they run
+  under the configured execution policy, which is documented, not sandboxed.)
 - Do NOT touch `stdout` in any code path. If you need to debug, use `logger.debug(...)`.
 - Do NOT add a config loader, CLI framework, or ORM. Keep it minimal.
+- Do NOT weaken a test to make it pass. If a security test fails, the security
+  property is broken; fix the code, and if the property is genuinely wrong,
+  change the test and the ADR together so the change is reviewable.
 - If unsure, call `pre_action_check` on your own proposed change.
