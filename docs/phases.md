@@ -174,6 +174,10 @@ are listed so nobody mistakes them for guarantees.
 **Goal.** Make the server work reliably in every supported agent, with exact
 configuration that is tested against each agent rather than guessed.
 
+> **Phase 4 will publish to npm. Until then, agents must point at a local clone
+> via `node /path/to/gatekeeper-mcp/dist/index.js`.** No `npx gatekeeper-mcp`
+> invocation exists yet, so any snippet using one will fail.
+
 **Deliverables**
 
 - Verified wiring for **OpenCode** v1 and v2, **Codex**, **Claude Code**, and
@@ -197,11 +201,70 @@ configuration that is tested against each agent rather than guessed.
 
 ### Exit Criteria
 
-- [ ] All four agents verified against a real session.
-- [ ] README snippets copy-paste without edits.
-- [ ] Compatibility matrix updated with verified, current paths.
-- [ ] Enforce-versus-advise distinction documented per agent.
-- [ ] Every version-sensitive snippet records the version it was tested on.
+- [x] Servers verified as registered and connected for OpenCode v2, Claude Code,
+      and Hermes Agent, against real installed CLIs (v2.0.18, 2.1.195, v0.17.0).
+- [!] "All four agents verified against a real session": Codex is not installed
+      and OpenCode v1 is not installed, so neither could be checked. No agent
+      session was run at all, since that is the one step that needs a human and a
+      real repository; see the manual checklist in
+      [agents/VERIFICATION.md](agents/VERIFICATION.md).
+- [x] README snippets copy-paste without edits, with placeholder paths only.
+- [x] Compatibility matrix added to `README.md` and to
+      [agents/README.md](agents/README.md), and `VERIFIED` is claimed only for
+      what was actually observed.
+- [x] Enforce-versus-advise distinction raised as an open question in every
+      guide. It is not answered, because answering it needs an agent session.
+- [x] Every version-sensitive snippet records the version it was tested on.
+- [x] `scripts/verify-agent.sh` with all three exit codes exercised against real
+      and synthetic CLIs.
+- [x] Per-agent guides with troubleshooting and open questions in `docs/agents/`.
+- [x] Copy-paste configs in `examples/agents/`, all JSON and TOML parsing.
+
+### Phase 3 — Known Limitations
+
+What Phase 3 could not establish, and why. Nothing here is a defect in the
+shipped configs; it is the boundary of what was actually observable.
+
+- **Codex is entirely unverified.** `codex` is not installed on the machine where
+  this phase was written, so no part of its config was observed: not the path,
+  not the table name, not the removal command, not a listing command. The example
+  is labelled `UNVERIFIED` in the file itself. Five specific questions are listed
+  in [agents/codex.md](agents/codex.md) and need answering by someone with a
+  working Codex.
+- **OpenCode v1 is entirely unverified**, for the same reason. Its example
+  assumes the documented `mcp.<name>` nesting, which is *not* what v2 uses, so a
+  v1 user copying it needs to confirm the shape.
+- **No agent session was run.** Every check was a non-interactive listing or a
+  connection handshake. The one claim that actually matters, whether a model
+  *obeys* a `deny`, is untested. Step 5 of
+  [agents/VERIFICATION.md](agents/VERIFICATION.md) covers it and needs a human.
+- **No listing command prints tool names.** All three verified agents list server
+  entries and a connection status, so "the tool is exposed to the model" is
+  confirmed only for Hermes, whose `mcp add` prints discovered tools by name
+  during the handshake. `verify-agent.sh` reports which of the two it matched
+  rather than collapsing them into a bare pass.
+- **Enforce versus advise is unanswered.** Whether an agent can be made to *must*
+  call the tool before editing, as opposed to being told to, is an open question
+  in every guide. This determines whether the project prevents Action Bias or
+  merely discourages it, and it is the most consequential unknown left.
+- **Version pinning is per-observation, not tested across a matrix.** Only the
+  three versions listed in [agents/README.md](agents/README.md) were checked. MCP
+  config formats change between major versions and nothing here detects that
+  automatically.
+- **`hermes mcp add` cannot be scripted.** It is interactive and cancels with no
+  TTY, silently writing nothing, so there is no non-interactive install path for
+  Hermes. It also rewrites and reformats the entire `config.yaml` rather than just
+  the entry it adds, so it should be run against a backup.
+- **The OpenCode global-config path behaved inconsistently under test.**
+  `mcp add --global` honours `XDG_CONFIG_HOME` when writing, but `mcp list` did
+  not read the entry back from an isolated location. Global installs should be
+  confirmed from a real terminal.
+- **Two real config errors were found and fixed**, both inherited from Phase 1:
+  the OpenCode nesting was `mcp.gatekeeper` where v2.0.18 writes
+  `mcp.servers.gatekeeper`, and the Hermes command used `--` where it requires
+  `--command ... --args ...`. The Phase 1 `install.sh` had the same Hermes error.
+  This is the argument for testing integration claims rather than documenting
+  them from memory.
 
 ---
 

@@ -1,0 +1,8 @@
+# UNVERIFIED - Codex is not installed on the machine where this example was
+# written, so no part of this file could be observed. Placeholder structure
+# based on common MCP conventions.
+# Verify against upstream documentation before relying on this.
+
+[mcp_servers.gatekeeper]
+command = "node"
+args = ["/ABSOLUTE/PATH/TO/gatekeeper-mcp/dist/index.js"]

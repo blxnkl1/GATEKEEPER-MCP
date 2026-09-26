@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gatekeeper": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/gatekeeper-mcp/dist/index.js"],
+      "env": {}
+    }
+  }
+}

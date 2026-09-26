@@ -321,22 +321,29 @@ The rules that keep the invariant:
 
 ## Compatibility Matrix
 
-| Agent | How to wire it | Config location |
-| --- | --- | --- |
-| OpenCode | `mcp.gatekeeper` with `type: "local"`, `command: ["npx", "gatekeeper-mcp"]` | `opencode.json` (project) or `~/.config/opencode/opencode.json` (global) |
-| Codex | `[mcp_servers.gatekeeper]` with `command = "npx"`, `args = ["gatekeeper-mcp"]` | `~/.codex/config.toml` |
-| Claude Code | `claude mcp add gatekeeper -- npx gatekeeper-mcp` | Managed by the CLI in `~/.claude.json` |
-| Hermes Agent | `hermes mcp add gatekeeper -- npx gatekeeper-mcp` | Managed by the `hermes` CLI |
+| Agent | Status | Config location | Guide |
+| --- | --- | --- | --- |
+| OpenCode v1 | UNVERIFIED | `opencode.json` (project) or `~/.config/opencode/opencode.json` (global) | [agents/opencode.md](./agents/opencode.md) |
+| OpenCode v2 | VERIFIED | `opencode.json` (project) or `~/.config/opencode/opencode.json` (global) | [agents/opencode.md](./agents/opencode.md) |
+| Codex | UNVERIFIED | `~/.codex/config.toml` (unconfirmed) | [agents/codex.md](./agents/codex.md) |
+| Claude Code | VERIFIED | `.mcp.json` (project) or `~/.claude.json` (local) | [agents/claude-code.md](./agents/claude-code.md) |
+| Hermes Agent | PARTIALLY VERIFIED | `~/.hermes/config.yaml` | [agents/hermes.md](./agents/hermes.md) |
 
-Exact snippets are in the project README. Phase 3 verifies this matrix against
-each agent's current released configuration format, since all four have changed
-their MCP schemas across major versions; the snippets above are the intended
-shape, not a tested guarantee.
+`VERIFIED` means the config was written or read back by that agent's own CLI and
+the server was observed to connect, on the version named in the guide. The full
+index is in [agents/README.md](./agents/README.md) and the copy-paste configs are
+in [`examples/agents/`](../examples/agents/).
+
+Two config details were found by observation rather than documentation, and both
+corrected what this project previously claimed: OpenCode v2 nests the entry at
+`mcp.servers.<name>` rather than `mcp.<name>`, and Hermes Agent uses
+`--command ... --args ...` with a YAML config rather than a `--` style flag.
 
 ## Future Work
 
 Roadmap, deliverables, and exit criteria for every phase are in
-[phases.md](./phases.md). In short: Phase 2 replaces the stubbed engine with
-real reproduction and state inspection, Phase 3 hardens agent integration,
-Phase 4 distributes the server, and Phase 5 adds rate limiting, file-pattern
-policies, a `.gatekeeperrc.json` config file, and a telemetry-free audit log.
+[phases.md](./phases.md). In short: Phase 2 replaced the stubbed engine with real
+reproduction and state inspection, Phase 3 produced per-agent guides and a
+verification script, Phase 4 distributes the server, and Phase 5 adds rate
+limiting, file-pattern policies, a `.gatekeeperrc.json` config file, and a
+telemetry-free audit log.

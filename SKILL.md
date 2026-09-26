@@ -105,10 +105,15 @@ work before calling the tool is what makes the difference between `allow` and
 
 ## How to invoke (for agents)
 Register this MCP server in the agent's config. Examples:
-- **OpenCode**: add to `opencode.json` → `mcp.gatekeeper.type = "local"`, `command = ["npx", "gatekeeper-mcp"]`.
-- **Codex**: `~/.codex/config.toml` → `[mcp_servers.gatekeeper]`, `command = "npx"`, `args = ["gatekeeper-mcp"]`.
-- **Claude Code**: `claude mcp add gatekeeper -- npx gatekeeper-mcp`.
-- **Hermes Agent**: `hermes mcp add gatekeeper -- npx gatekeeper-mcp`.
+- **OpenCode**: add to `opencode.json` → `mcp.servers.gatekeeper.type = "local"`, `command = ["node", "<REPO>/dist/index.js"]`.
+- **Codex**: `~/.codex/config.toml` → `[mcp_servers.gatekeeper]`, `command = "node"`, `args = ["<REPO>/dist/index.js"]`.
+- **Claude Code**: `claude mcp add gatekeeper -- node <REPO>/dist/index.js`.
+- **Hermes Agent**: `hermes mcp add gatekeeper --command node --args <REPO>/dist/index.js`.
+
+### Where to find per-agent setup
+- `docs/agents/` — full guides, one per agent.
+- `examples/agents/` — copy-paste configs.
+- `scripts/verify-agent.sh <agent-cli>` — checks that `pre_action_check` is loaded.
 
 ## Guardrails for the agent working ON this project
 - Do NOT implement Phase 2+ features while in Phase 1. Stubs stay stubs until their phase.

@@ -1,0 +1,9 @@
+# UNVERIFIED - Hermes Agent config format not confirmed for TOML.
+# Placeholder structure based on common MCP conventions.
+# Verify against upstream documentation before relying on this.
+# The confirmed format is config.yaml in this folder.
+
+[mcp_servers.gatekeeper]
+command = "node"
+args = ["/ABSOLUTE/PATH/TO/gatekeeper-mcp/dist/index.js"]
+enabled = true

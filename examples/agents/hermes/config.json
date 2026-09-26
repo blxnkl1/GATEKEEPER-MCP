@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gatekeeper": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/gatekeeper-mcp/dist/index.js"],
+      "env": {},
+      "enabled": true
+    }
+  }
+}

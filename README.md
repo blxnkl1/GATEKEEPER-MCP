@@ -50,20 +50,27 @@ npm install
 npm run build
 ```
 
-## Wire into agents
+## Quick start with any agent
 
 The server is not published to npm yet (that is Phase 4), so point your agent at
-the built entrypoint. Use `<PATH_TO_REPO>` for the absolute path to this repo.
+the built entrypoint. Use `<PATH_TO_REPO>` for the **absolute** path to this repo:
+MCP servers start with an unspecified working directory, so a relative path will
+not resolve.
 
 **OpenCode** — `opencode.json`:
+
+```bash
+opencode mcp add gatekeeper -- node <PATH_TO_REPO>/dist/index.js
+```
 
 ```json
 {
   "mcp": {
-    "gatekeeper": {
-      "type": "local",
-      "command": ["node", "<PATH_TO_REPO>/dist/index.js"],
-      "enabled": true
+    "servers": {
+      "gatekeeper": {
+        "type": "local",
+        "command": ["node", "<PATH_TO_REPO>/dist/index.js"]
+      }
     }
   }
 }
@@ -83,15 +90,36 @@ args = ["<PATH_TO_REPO>/dist/index.js"]
 claude mcp add gatekeeper -- node <PATH_TO_REPO>/dist/index.js
 ```
 
-**Hermes Agent**:
+**Hermes Agent** — `~/.hermes/config.yaml`. This command is interactive: it
+connects, lists the tools it finds, and asks which to enable. Answer `Y`.
 
 ```bash
-hermes mcp add gatekeeper -- node <PATH_TO_REPO>/dist/index.js
+hermes mcp add gatekeeper --command node --args <PATH_TO_REPO>/dist/index.js
 ```
 
 Once published to npm, every command above works with `npx gatekeeper-mcp`
-instead. See [docs/phases.md](./docs/phases.md) for the verification status of
-each agent, which Phase 3 will confirm against current released versions.
+instead.
+
+### Compatibility matrix
+
+| Agent | Status | Config path | Guide |
+| --- | --- | --- | --- |
+| OpenCode v1 | UNVERIFIED | `opencode.json` | [docs/agents/opencode.md](./docs/agents/opencode.md) |
+| OpenCode v2 | VERIFIED | `opencode.json` | [docs/agents/opencode.md](./docs/agents/opencode.md) |
+| Codex | UNVERIFIED | `~/.codex/config.toml` (unconfirmed) | [docs/agents/codex.md](./docs/agents/codex.md) |
+| Claude Code | VERIFIED | `~/.claude.json` / `.mcp.json` | [docs/agents/claude-code.md](./docs/agents/claude-code.md) |
+| Hermes Agent | PARTIALLY VERIFIED | `~/.hermes/config.yaml` | [docs/agents/hermes.md](./docs/agents/hermes.md) |
+
+Configs that are not yet fully verified are marked accordingly in each guide.
+
+- Full guides, with troubleshooting and scope: [docs/agents/](./docs/agents/)
+- Copy-paste configs: [examples/agents/](./examples/agents/)
+- Check an install: `bash scripts/verify-agent.sh opencode`
+- Manual checklist: [docs/agents/VERIFICATION.md](./docs/agents/VERIFICATION.md)
+
+The snippets above are a starting point. Prefer each agent's `mcp add` command
+over hand-editing a file: the CLI writes whatever the installed version actually
+expects, which is the one thing that changes between major versions.
 
 ## Tools
 

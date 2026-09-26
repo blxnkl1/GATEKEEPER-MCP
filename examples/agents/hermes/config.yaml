@@ -1,0 +1,12 @@
+# UNVERIFIED - Hermes Agent config format confirmed only for YAML.
+# This YAML variant IS the empirically observed shape:
+# `hermes mcp add gatekeeper --command node --args <path>` wrote exactly these
+# keys to ~/.hermes/config.yaml on hermes v0.17.0.
+# See config.toml and config.json in this folder for the unverified variants.
+
+mcp_servers:
+  gatekeeper:
+    command: node
+    args:
+      - /ABSOLUTE/PATH/TO/gatekeeper-mcp/dist/index.js
+    enabled: true
